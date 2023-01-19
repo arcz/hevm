@@ -2,7 +2,7 @@ module EVM.StorageLayout where
 
 -- Figures out the layout of storage slots for Solidity contracts.
 
-import EVM.Dapp (DappInfo, dappAstSrcMap, dappAstIdMap)
+import EVM.Dapp (DappInfo(..))
 import EVM.Solidity (SolcContract, creationSrcmap, SlotType(..))
 import EVM.ABI (AbiType (..), parseTypeName)
 
@@ -32,9 +32,9 @@ findContractDefinition :: DappInfo -> SolcContract -> Maybe Value
 findContractDefinition dapp solc =
   -- The first source mapping in the contract's creation code
   -- corresponds to the source field of the contract definition.
-  case Seq.viewl (view creationSrcmap solc) of
+  case Seq.viewl solc.creationSrcmap of
     firstSrcMap Seq.:< _ ->
-      (view dappAstSrcMap dapp) firstSrcMap
+      dapp.astSrcMap firstSrcMap
     _ ->
       Nothing
 
@@ -57,7 +57,7 @@ storageLayout dapp solc =
           (\case
              Number i -> fromMaybe (error "malformed AST JSON") $
                storageVariablesForContract =<<
-                 preview (dappAstIdMap . ix (floor i)) dapp
+                 preview (ix (floor i)) dapp.astIdMap
              _ ->
                error "malformed AST JSON")
 

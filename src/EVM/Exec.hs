@@ -42,20 +42,20 @@ vmForEthrunCreation creationCode =
     , vmoptCreate = False
     , vmoptTxAccessList = mempty
     , vmoptAllowFFI = False
-    }) & set (env . contracts . at ethrunAddress)
+    }) & set (#env . #contracts . at ethrunAddress)
              (Just (initialContract (RuntimeCode (ConcreteRuntimeCode ""))))
 
 exec :: State VM VMResult
 exec = do
   vm <- get
-  case view result vm of
+  case vm.result of
     Nothing -> exec1 >> exec
     Just r -> pure r
 
 run :: State VM VM
 run = do
   vm <- get
-  case view result vm of
+  case vm.result of
     Nothing -> exec1 >> run
     Just _ -> pure vm
 
@@ -64,7 +64,7 @@ execWhile p = go 0
   where
     go i = do
       vm <- get
-      if p vm && isNothing (view result vm)
+      if p vm && isNothing vm.result
         then do
           go $! (i + 1)
       else

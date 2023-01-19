@@ -358,8 +358,8 @@ assert cmd = do
     -- calldata according to given abi with possible specializations from the `arg` list
     (Nothing, Just sig') -> do
       method' <- functionAbi sig'
-      let typs = snd <$> view methodInputs method'
-      pure $ symCalldata (view methodSignature method') typs cmd.arg mempty
+      let typs = snd <$> method'.inputs
+      pure $ symCalldata method'.signature' typs cmd.arg mempty
     _ -> error "incompatible options: calldata and abi"
 
   preState <- symvmFromCommand cmd calldata'
@@ -471,7 +471,7 @@ launchExec cmd = do
       Run -> do
         vm' <- execStateT (EVM.Stepper.interpret (EVM.Fetch.oracle solvers rpcinfo) . void $ EVM.Stepper.execFully) vm
         when cmd.trace $ T.hPutStr stderr (showTraceTree dapp vm')
-        case view EVM.result vm' of
+        case vm'.result of
           Nothing ->
             error "internal error; no EVM result"
           Just (EVM.VMFailure (EVM.Revert msg)) -> do
@@ -495,7 +495,7 @@ launchExec cmd = do
             case cmd.cache of
               Nothing -> pure ()
               Just path ->
-                Git.saveFacts (Git.RepoAt path) (Facts.cacheFacts (view EVM.cache vm'))
+                Git.saveFacts (Git.RepoAt path) (Facts.cacheFacts vm'.cache)
 
       Debug -> void $ TTY.runFromVM solvers rpcinfo Nothing dapp vm
       --JsonTrace -> void $ execStateT (interpretWithTrace fetcher EVM.Stepper.runFully) vm
@@ -512,11 +512,11 @@ vmFromCommand cmd = do
     Nothing -> return (0,Lit 0,0,0,0)
     Just url -> EVM.Fetch.fetchBlockFrom block' url >>= \case
       Nothing -> error "Could not fetch block"
-      Just EVM.Block{..} -> return (_coinbase
-                                   , _timestamp
-                                   , _baseFee
-                                   , _number
-                                   , _prevRandao
+      Just EVM.Block{..} -> return ( coinbase
+                                   , timestamp
+                                   , baseFee
+                                   , number
+                                   , prevRandao
                                    )
 
   contract <- case (cmd.rpc, cmd.address, cmd.code) of
@@ -529,9 +529,9 @@ vmFromCommand cmd = do
           -- fetch the contract and overwrite the code
           return $
             EVM.initialContract  (mkCode $ hexByteString "--code" $ strip0x c)
-              & set EVM.balance  (view EVM.balance  contract')
-              & set EVM.nonce    (view EVM.nonce    contract')
-              & set EVM.external (view EVM.external contract')
+              & set #balance  contract'.balance
+              & set #nonce    contract'.nonce
+              & set #external contract'.external
 
     (Just url, Just addr', Nothing) ->
       EVM.Fetch.fetchContractFrom block' url addr' >>= \case
@@ -601,10 +601,10 @@ symvmFromCommand cmd calldata' = do
     Nothing -> return (0,0,0,0)
     Just url -> EVM.Fetch.fetchBlockFrom block' url >>= \case
       Nothing -> error "Could not fetch block"
-      Just EVM.Block{..} -> return (_coinbase
-                                   , _number
-                                   , _baseFee
-                                   , _prevRandao
+      Just EVM.Block{..} -> return ( coinbase
+                                   , number
+                                   , baseFee
+                                   , prevRandao
                                    )
 
   let
@@ -638,9 +638,9 @@ symvmFromCommand cmd calldata' = do
               Just c -> EVM.initialContract (mkCode $ decipher c)
                         -- TODO: fix this
                         -- & set EVM.origStorage (view EVM.origStorage contract')
-                        & set EVM.balance     (view EVM.balance contract')
-                        & set EVM.nonce       (view EVM.nonce contract')
-                        & set EVM.external    (view EVM.external contract')
+                        & set #balance  contract'.balance
+                        & set #nonce    contract'.nonce
+                        & set #external contract'.external
 
     (_, _, Just c)  ->
       return (EVM.initialContract . mkCode $ decipher c)
@@ -648,7 +648,7 @@ symvmFromCommand cmd calldata' = do
       error "must provide at least (rpc + address) or code"
 
   return $ (EVM.Transaction.initTx $ withCache $ vm0 baseFee miner ts blockNum prevRan calldata' callvalue' caller' contract')
-    & set (EVM.env . EVM.storage) store
+    & set (#env . #storage) store
 
   where
     decipher = hexByteString "bytes" . strip0x

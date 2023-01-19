@@ -28,21 +28,20 @@ module EVM.Format
 import Prelude hiding (Word)
 
 import qualified EVM
-import EVM.Dapp (DappInfo (..), dappSolcByHash, dappAbiMap, showTraceLocation, dappEventMap, dappErrorMap)
-import EVM.Dapp (DappContext (..), contextInfo, contextEnv)
-import EVM (VM, cheatCode, traceForest, traceData, Error (..))
+import EVM.Dapp (DappInfo (..), showTraceLocation)
+import EVM.Dapp (DappContext (..))
+import EVM (VM, cheatCode, traceForest, Error (..))
 import EVM (Trace, TraceData (..), Query (..), FrameContext (..))
 import EVM.Types (maybeLitWord, W256 (..), num, word, Expr(..), EType(..))
 import EVM.Types (Addr, ByteStringS(..), Error(..))
 import EVM.ABI (AbiValue (..), Event (..), AbiType (..), SolError (..))
 import EVM.ABI (Indexed (NotIndexed), getAbiSeq)
 import EVM.ABI (parseTypeName, formatString)
-import EVM.Solidity (SolcContract(..), contractName, abiMap)
-import EVM.Solidity (methodOutput, methodSignature, methodName)
+import EVM.Solidity (SolcContract(..), abiMap, Method(..))
 import EVM.Hexdump
 
 import Control.Arrow ((>>>))
-import Control.Lens (view, preview, ix, _2, to, (^?!))
+import Control.Lens (preview, ix, _2)
 import Data.Binary.Get (runGetOrFail)
 import Data.Bits       (shiftR)
 import Data.ByteString (ByteString)
@@ -85,9 +84,9 @@ showWordExact w = humanizeInteger (toInteger w)
 showWordExplanation :: W256 -> DappInfo -> Text
 showWordExplanation w _ | w > 0xffffffff = showDec Unsigned w
 showWordExplanation w dapp =
-  case Map.lookup (fromIntegral w) (view dappAbiMap dapp) of
+  case Map.lookup (fromIntegral w) dapp.abiMap of
     Nothing -> showDec Unsigned w
-    Just x  -> "keccak(\"" <> view methodSignature x <> "\")"
+    Just x  -> "keccak(\"" <> x.signature' <> "\")"
 
 humanizeInteger :: (Num a, Integral a, Show a) => a -> Text
 humanizeInteger =
@@ -109,14 +108,12 @@ showAbiValue (AbiString bs) = formatBytes bs
 showAbiValue (AbiBytesDynamic bs) = formatBytes bs
 showAbiValue (AbiBytes _ bs) = formatBinary bs
 showAbiValue (AbiAddress addr) =
-  let dappinfo = view contextInfo ?context
-      contracts = view contextEnv ?context
-      name = case (Map.lookup addr contracts) of
+  let name = case (Map.lookup addr ?context.env) of
         Nothing -> ""
         Just contract ->
-          let hash = maybeLitWord $ view EVM.codehash contract
+          let hash = maybeLitWord contract.codehash
           in case hash of
-               Just h -> maybeContractName' (preview (dappSolcByHash . ix h . _2) dappinfo)
+               Just h -> maybeContractName' (preview (ix h . _2) ?context.info.solcByHash)
                Nothing -> ""
   in
     name <> "@" <> (pack $ show addr)
@@ -147,9 +144,8 @@ showCall _ _ = "<symbolic>"
 
 showError :: (?context :: DappContext) => Expr Buf -> Text
 showError (ConcreteBuf bs) =
-  let dappinfo = view contextInfo ?context
-      bs4 = BS.take 4 bs
-  in case Map.lookup (word bs4) (view dappErrorMap dappinfo) of
+  let bs4 = BS.take 4 bs
+  in case Map.lookup (word bs4) ?context.info.errorMap of
       Just (SolError errName ts) -> errName <> " " <> showCall ts (ConcreteBuf bs)
       Nothing -> case bs4 of
                   -- Method ID for Error(string)
@@ -199,14 +195,14 @@ unindexed ts = [t | (_, t, NotIndexed) <- ts]
 
 showTrace :: DappInfo -> VM -> Trace -> Text
 showTrace dapp vm trace =
-  let ?context = DappContext { _contextInfo = dapp, _contextEnv = vm ^?! EVM.env . EVM.contracts }
+  let ?context = DappContext { info = dapp, env = vm.env.contracts }
   in let
     pos =
       case showTraceLocation dapp trace of
         Left x -> " \x1b[1m" <> x <> "\x1b[0m"
         Right x -> " \x1b[1m(" <> x <> ")\x1b[0m"
-    fullAbiMap = view dappAbiMap dapp
-  in case view traceData trace of
+    fullAbiMap = dapp.abiMap
+  in case trace.data' of
     EventTrace _ bytes topics ->
       let logn = mconcat
             [ "\x1b[36m"
@@ -233,7 +229,7 @@ showTrace dapp vm trace =
         (t1:_) ->
           case maybeLitWord t1 of
             Just topic ->
-              case Map.lookup (topic) (view dappEventMap dapp) of
+              case Map.lookup topic dapp.eventMap of
                 Just (Event name _ types) ->
                   knownTopic name types
                 Nothing ->
@@ -255,9 +251,9 @@ showTrace dapp vm trace =
                           Nothing  ->
                             "<symbolic>"
                       in
-                        case Map.lookup sig (view dappAbiMap dapp) of
+                        case Map.lookup sig dapp.abiMap of
                           Just m ->
-                            lognote (view methodSignature m) usr
+                            lognote m.signature' usr
                           Nothing ->
                             logn
                     _ ->
@@ -289,7 +285,7 @@ showTrace dapp vm trace =
       "← " <>
         case Map.lookup (fromIntegral abi) fullAbiMap of
           Just m  ->
-            case unzip (view methodOutput m) of
+            case unzip m.output of
               ([], []) ->
                 formatSBinary out
               (_, ts) ->
@@ -305,7 +301,7 @@ showTrace dapp vm trace =
       t
     FrameTrace (CreationContext addr (Lit hash) _ _ ) -> -- FIXME: irrefutable pattern
       "create "
-      <> maybeContractName (preview (dappSolcByHash . ix hash . _2) dapp)
+      <> maybeContractName (preview (ix hash . _2) dapp.solcByHash)
       <> "@" <> pack (show addr)
       <> pos
     FrameTrace (CreationContext addr _ _ _ ) ->
@@ -318,7 +314,7 @@ showTrace dapp vm trace =
                      then "call "
                      else "delegatecall "
           hash' = fromJust $ maybeLitWord hash
-      in case preview (dappSolcByHash . ix hash' . _2) dapp of
+      in case preview (ix hash' . _2) dapp.solcByHash of
         Nothing ->
           calltype
             <> pack (show target)
@@ -326,9 +322,9 @@ showTrace dapp vm trace =
             <> case Map.lookup (fromIntegral (fromMaybe 0x00 abi)) fullAbiMap of
                  Just m  ->
                    "\x1b[1m"
-                   <> view methodName m
+                   <> m.name
                    <> "\x1b[0m"
-                   <> showCall (catMaybes (getAbiTypes (view methodSignature m))) calldata
+                   <> showCall (catMaybes (getAbiTypes m.signature')) calldata
                  Nothing ->
                    formatSBinary calldata
             <> pos
@@ -336,7 +332,7 @@ showTrace dapp vm trace =
         Just solc ->
           calltype
             <> "\x1b[1m"
-            <> view (contractName . to contractNamePart) solc
+            <> contractNamePart solc.contractName
             <> "::"
             <> maybe "[fallback function]"
                  (fromMaybe "[unknown method]" . maybeAbiName solc)
@@ -356,14 +352,14 @@ getAbiTypes abi = map (parseTypeName mempty) types
 
 maybeContractName :: Maybe SolcContract -> Text
 maybeContractName =
-  maybe "<unknown contract>" (view (contractName . to contractNamePart))
+  maybe "<unknown contract>" (contractNamePart . (.contractName))
 
 maybeContractName' :: Maybe SolcContract -> Text
 maybeContractName' =
-  maybe "" (view (contractName . to contractNamePart))
+  maybe "" (contractNamePart . (.contractName))
 
 maybeAbiName :: SolcContract -> W256 -> Maybe Text
-maybeAbiName solc abi = preview (abiMap . ix (fromIntegral abi) . methodSignature) solc
+maybeAbiName solc abi = (.signature') <$> Map.lookup (fromIntegral abi) solc.abiMap
 
 contractNamePart :: Text -> Text
 contractNamePart x = Text.split (== ':') x !! 1

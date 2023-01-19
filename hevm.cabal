@@ -64,6 +64,7 @@ common shared
     DuplicateRecordFields
     LambdaCase
     NoFieldSelectors
+    OverloadedLabels
     OverloadedRecordDot
     OverloadedStrings
     RecordWildCards
@@ -156,6 +157,7 @@ library
     free                              >= 5.1.3 && < 5.2,
     haskeline                         >= 0.8.0 && < 0.9,
     process                           >= 1.6.5 && < 1.7,
+    generic-lens,
     lens                              >= 5.1.1 && < 5.2,
     lens-aeson                        >= 1.2.2 && < 1.3,
     monad-par                         >= 0.3.5 && < 0.4,
@@ -216,6 +218,7 @@ executable hevm
     filepath,
     free,
     hevm,
+    generic-lens,
     lens,
     lens-aeson,
     memory,
@@ -263,6 +266,7 @@ common test-base
     here,
     hevm,
     lens,
+    generic-lens,
     mtl,
     data-dword,
     process,

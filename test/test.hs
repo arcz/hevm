@@ -43,7 +43,7 @@ import qualified Data.Map.Strict as Map
 import Data.Binary.Put (runPut)
 import Data.Binary.Get (runGetOrFail)
 
-import EVM hiding (Query, allowFFI)
+import EVM hiding (Query)
 import EVM.SymExec
 import EVM.ABI
 import EVM.Exec
@@ -432,7 +432,7 @@ tests = testGroup "hevm"
         (json, path') <- solidity' srccode
         let (solc', _, _) = fromJust $ readJSON json
             initCode :: ByteString
-            initCode = fromJust $ solc' ^? ix (path' <> ":A") . creationCode
+            initCode = fromJust $ Map.lookup (path' <> ":A") solc' <&> (.creationCode)
         -- add constructor arguments
         assertEqual "constructor args screwed up metadata stripping" (stripBytecodeMetadata (initCode <> encodeAbiValue (AbiUInt 256 1))) (stripBytecodeMetadata initCode)
     ]
@@ -1070,7 +1070,7 @@ tests = testGroup "hevm"
                                        [x', y'] -> (x', y')
                                        _ -> error "expected 2 args"
                         in (x .<= Expr.add x y)
-                           .&& view (state . callvalue) preVM .== Lit 0
+                           .&& preVM.state.callvalue .== Lit 0
             post prestate leaf =
               let (x, y) = case getStaticAbiArgs 2 prestate of
                              [x', y'] -> (x', y')
@@ -1096,7 +1096,7 @@ tests = testGroup "hevm"
                                        _ -> error "expected 2 args"
                         in (x .<= Expr.add x y)
                            .&& (x .== y)
-                           .&& view (state . callvalue) preVM .== Lit 0
+                           .&& preVM.state.callvalue .== Lit 0
             post prestate leaf =
               let (_, y) = case getStaticAbiArgs 2 prestate of
                              [x', y'] -> (x', y')
@@ -1121,13 +1121,13 @@ tests = testGroup "hevm"
             }
           }
           |]
-        let pre vm = Lit 0 .== view (state . callvalue) vm
+        let pre vm = Lit 0 .== vm.state.callvalue
             post prestate leaf =
               let y = case getStaticAbiArgs 1 prestate of
                         [y'] -> y'
                         _ -> error "expected 1 arg"
-                  this = Expr.litAddr $ view (state . codeContract) prestate
-                  prex = Expr.readStorage' this (Lit 0) (view (env . storage) prestate)
+                  this = Expr.litAddr prestate.state.codeContract
+                  prex = Expr.readStorage' this (Lit 0) prestate.env.storage
               in case leaf of
                 Return _ _ postStore -> Expr.add prex (Expr.mul (Lit 2) y) .== (Expr.readStorage' this (Lit 0) postStore)
                 _ -> PBool True
@@ -1175,13 +1175,13 @@ tests = testGroup "hevm"
               }
             }
             |]
-          let pre vm = (Lit 0) .== view (state . callvalue) vm
+          let pre vm = (Lit 0) .== vm.state.callvalue
               post prestate poststate =
                 let (x,y) = case getStaticAbiArgs 2 prestate of
                         [x',y'] -> (x',y')
                         _ -> error "expected 2 args"
-                    this = Expr.litAddr $ view (state . codeContract) prestate
-                    prestore =  view (env . storage) prestate
+                    this = Expr.litAddr prestate.state.codeContract
+                    prestore = prestate.env.storage
                     prex = Expr.readStorage' this x prestore
                     prey = Expr.readStorage' this y prestore
                 in case poststate of
@@ -1209,13 +1209,13 @@ tests = testGroup "hevm"
               }
             }
             |]
-          let pre vm = (Lit 0) .== view (state . callvalue) vm
+          let pre vm = (Lit 0) .== vm.state.callvalue
               post prestate poststate =
                 let (x,y) = case getStaticAbiArgs 2 prestate of
                         [x',y'] -> (x',y')
                         _ -> error "expected 2 args"
-                    this = Expr.litAddr $ view (state . codeContract) prestate
-                    prestore =  view (env . storage) prestate
+                    this = Expr.litAddr prestate.state.codeContract
+                    prestore = prestate.env.storage
                     prex = Expr.readStorage' this x prestore
                     prey = Expr.readStorage' this y prestore
                 in case poststate of
@@ -1654,8 +1654,8 @@ tests = testGroup "hevm"
           (_, [Cex (_, cex)]) <- withSolvers Z3 1 Nothing $ \s -> do
             let vm0 = abstractVM (Just ("call_A()", [])) [] c Nothing SymbolicS
             let vm = vm0
-                  & set (state . callvalue) (Lit 0)
-                  & over (env . contracts)
+                  & set (#state . #callvalue) (Lit 0)
+                  & over (#env . #contracts)
                        (Map.insert aAddr (initialContract (RuntimeCode (ConcreteRuntimeCode a))))
             verify s defaultVeriOpts vm (Just $ checkAssertions defaultPanicCodes)
 
@@ -2192,7 +2192,7 @@ runSimpleVM :: ByteString -> ByteString -> Maybe ByteString
 runSimpleVM x ins = case loadVM x of
                       Nothing -> Nothing
                       Just vm -> let calldata' = (ConcreteBuf ins)
-                       in case runState (assign (state . calldata) calldata' >> exec) vm of
+                       in case runState (assign (#state . #calldata) calldata' >> exec) vm of
                             (VMSuccess (ConcreteBuf bs), _) -> Just bs
                             _ -> Nothing
 
@@ -2200,11 +2200,11 @@ loadVM :: ByteString -> Maybe VM
 loadVM x =
     case runState exec (vmForEthrunCreation x) of
        (VMSuccess (ConcreteBuf targetCode), vm1) -> do
-         let target = view (state . contract) vm1
+         let target = vm1.state.contract
              vm2 = execState (replaceCodeOfSelf (RuntimeCode (ConcreteRuntimeCode targetCode))) vm1
          return $ snd $ flip runState vm2
                 (do resetState
-                    assign (state . gas) 0xffffffffffffffff -- kludge
+                    assign (#state . #gas) 0xffffffffffffffff -- kludge
                     loadContract target)
        _ -> Nothing
 
@@ -2258,9 +2258,7 @@ runStatements stmts args t = do
   |] (abiMethod s (AbiTuple $ Vector.fromList args))
 
 getStaticAbiArgs :: Int -> VM -> [Expr EWord]
-getStaticAbiArgs n vm =
-  let cd = view (state . calldata) vm
-  in decodeStaticArgs 4 n cd
+getStaticAbiArgs n vm = decodeStaticArgs 4 n vm.state.calldata
 
 -- includes shaving off 4 byte function sig
 decodeAbiValues :: [AbiType] -> ByteString -> [AbiValue]

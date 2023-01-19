@@ -3,7 +3,7 @@ module EVM.Transaction where
 import Prelude hiding (Word)
 
 import qualified EVM
-import EVM (balance, initialContract)
+import EVM (initialContract)
 import EVM.FeeSchedule
 import EVM.Precompiled (execute)
 import EVM.RLP
@@ -190,8 +190,8 @@ newAccount = initialContract $ EVM.RuntimeCode (EVM.ConcreteRuntimeCode "")
 setupTx :: Addr -> Addr -> W256 -> Word64 -> Map Addr EVM.Contract -> Map Addr EVM.Contract
 setupTx origin coinbase gasPrice gasLimit prestate =
   let gasCost = gasPrice * (num gasLimit)
-  in (Map.adjust ((over EVM.nonce   (+ 1))
-               . (over balance (subtract gasCost))) origin)
+  in (Map.adjust ((over #nonce (+ 1))
+               . (over #balance (subtract gasCost))) origin)
     . touchAccount origin
     . touchAccount coinbase $ prestate
 
@@ -200,22 +200,22 @@ setupTx origin coinbase gasPrice gasLimit prestate =
 -- and pay receiving address
 initTx :: EVM.VM -> EVM.VM
 initTx vm = let
-    toAddr   = view (EVM.state . EVM.contract) vm
-    origin   = view (EVM.tx . EVM.origin) vm
-    gasPrice = view (EVM.tx . EVM.gasprice) vm
-    gasLimit = view (EVM.tx . EVM.txgaslimit) vm
-    coinbase = view (EVM.block . EVM.coinbase) vm
-    value    = view (EVM.state . EVM.callvalue) vm
-    toContract = initialContract (view (EVM.state . EVM.code) vm)
-    preState = setupTx origin coinbase gasPrice gasLimit $ view (EVM.env . EVM.contracts) vm
-    oldBalance = view (accountAt toAddr . balance) preState
-    creation = view (EVM.tx . EVM.isCreate) vm
+    toAddr   = vm.state.contract
+    origin   = vm.tx.origin
+    gasPrice = vm.tx.gasprice
+    gasLimit = vm.tx.txgaslimit
+    coinbase = vm.block.coinbase
+    value    = vm.state.callvalue
+    toContract = initialContract vm.state.code
+    preState = setupTx origin coinbase gasPrice gasLimit vm.env.contracts
+    oldBalance = view (accountAt toAddr . #balance) preState
+    creation = vm.tx.isCreate
     initState = (case unlit value of
-      Just v -> ((Map.adjust (over balance (subtract v))) origin)
-              . (Map.adjust (over balance (+ v))) toAddr
+      Just v -> ((Map.adjust (over #balance (subtract v))) origin)
+              . (Map.adjust (over #balance (+ v))) toAddr
       Nothing -> id)
       . (if creation
-         then Map.insert toAddr (toContract & balance .~ oldBalance)
+         then Map.insert toAddr (toContract & #balance .~ oldBalance)
          else touchAccount toAddr)
       $ preState
 
@@ -226,7 +226,7 @@ initTx vm = let
     resetStore (SStore {}) = error "cannot reset storage if it contains symbolic addresses"
     resetStore s = s
     in
-      vm & EVM.env . EVM.contracts .~ initState
-         & EVM.tx . EVM.txReversion .~ preState
-         & EVM.env . EVM.storage %~ resetStore
-         & EVM.env . EVM.origStorage %~ resetConcreteStore
+      vm & #env . #contracts .~ initState
+         & #tx . #txReversion .~ preState
+         & #env . #storage %~ resetStore
+         & #env . #origStorage %~ resetConcreteStore

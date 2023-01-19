@@ -8,7 +8,7 @@ import Prelude hiding (Word)
 import EVM.ABI
 import EVM.Types    (Addr, W256, hexText, Expr(Lit), Expr(..), Prop(..), (.&&), (./=))
 import EVM.SMT
-import EVM          (EVM, Contract, Block, initialContract, nonce, balance, external)
+import EVM          (EVM, Contract, Block, initialContract)
 import qualified EVM.FeeSchedule as FeeSchedule
 
 import qualified EVM
@@ -143,9 +143,9 @@ fetchContractWithSession n url addr sess = runMaybeT $ do
 
   return $
     initialContract (EVM.RuntimeCode (EVM.ConcreteRuntimeCode theCode))
-      & set nonce    theNonce
-      & set balance  theBalance
-      & set external True
+      & set #nonce    theNonce
+      & set #balance  theBalance
+      & set #external True
 
 fetchSlotWithSession
   :: BlockNumber -> Text -> Session -> Addr -> W256 -> IO (Maybe W256)
