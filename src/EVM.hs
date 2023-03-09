@@ -2155,11 +2155,14 @@ create self this xGas' xValue xs newAddr initCode = do
     -- from memory into a code and data section
     -- TODO: comment explaining whats going on here
     let contract' = do
-          prefixLen <- Expr.concPrefix initCode
-          prefix <- Expr.toList $ Expr.take (num prefixLen) initCode
-          let sym = Expr.drop (num prefixLen) initCode
-          conc <- mapM unlitByte prefix
-          pure $ InitCode (BS.pack $ V.toList conc) sym
+          case initCode of
+            ConcreteBuf bs -> Just (InitCode bs (ConcreteBuf ""))
+            _ -> do
+              prefixLen <- Expr.concPrefix initCode
+              prefix <- Expr.toList $ Expr.take (num prefixLen) initCode
+              let sym = Expr.drop (num prefixLen) initCode
+              conc <- mapM unlitByte prefix
+              pure $ InitCode (BS.pack $ V.toList conc) sym
     case contract' of
       Nothing ->
         vmError $ UnexpectedSymbolicArg vm0._state._pc "initcode must have a concrete prefix" []
