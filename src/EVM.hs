@@ -2520,11 +2520,10 @@ stackOp1
   -> EVM ()
 stackOp1 cost f =
   use (state . stack) >>= \case
-    (x:xs) ->
+    (!x : xs) ->
       burn (cost x) $ do
         next
-        let !y = f x
-        state . stack .= y : xs
+        state . stack .= (f x) : xs
     _ ->
       underrun
 
@@ -2535,7 +2534,7 @@ stackOp2
   -> EVM ()
 stackOp2 cost f =
   use (state . stack) >>= \case
-    (x:y:xs) ->
+    (!x : !y : xs) ->
       burn (cost (x, y)) $ do
         next
         state . stack .= f (x, y) : xs
@@ -2549,7 +2548,7 @@ stackOp3
   -> EVM ()
 stackOp3 cost f =
   use (state . stack) >>= \case
-    (x:y:z:xs) ->
+    (!x : !y : !z : xs) ->
       burn (cost (x, y, z)) $ do
       next
       state . stack .= f (x, y, z) : xs
