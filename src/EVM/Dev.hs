@@ -362,7 +362,7 @@ vat = do
   fmap fromJust (solcRuntime "Vat" src)
 
 initVm :: ByteString -> ST s (VM s)
-initVm bs = pure vm
+initVm bs = vm
   where
     contractCode = RuntimeCode (ConcreteRuntimeCode bs)
     c = Contract

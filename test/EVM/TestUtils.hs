@@ -3,6 +3,7 @@
 module EVM.TestUtils where
 
 import Data.Text
+import Control.Monad.ST (RealWorld)
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
 import qualified Paths_hevm as Paths
@@ -48,7 +49,7 @@ debugDappTest testFile rpcinfo = do
         opts <- testOpts solvers root json ".*" Nothing True rpcinfo
         TTY.main opts root file
 
-testOpts :: SolverGroup -> FilePath -> Text -> Text -> Maybe Integer -> Bool -> RpcInfo -> IO UnitTestOptions
+testOpts :: SolverGroup -> FilePath -> Text -> Text -> Maybe Integer -> Bool -> RpcInfo -> IO (UnitTestOptions RealWorld)
 testOpts solvers root solcJson match maxIter allowFFI rpcinfo = do
   srcInfo <- case readJSON solcJson of
                Nothing -> error "Could not read solc json"

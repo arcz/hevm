@@ -66,6 +66,7 @@ import qualified EVM.Transaction
 import EVM.Format (formatBinary)
 import EVM.Sign (deriveAddr)
 import GHC.IO.Exception (ExitCode(ExitSuccess))
+import Control.Monad.ST (RealWorld, ST, stToIO)
 
 data VMTraceResult =
   VMTraceResult
@@ -285,7 +286,7 @@ evmSetup contr txData gaslimitExec = (txn, evmEnv, contrAlloc, fromAddress, toAd
     toAddress :: Addr
     toAddress = 0x8A8eAFb1cf62BfBeb1741769DAE1a9dd47996192
 
-getHEVMRet :: OpContract -> ByteString -> Int -> IO (Either (EVM.Error, [VMTrace]) (Expr 'End, [VMTrace], VMTraceResult))
+getHEVMRet :: OpContract -> ByteString -> Int -> IO (Either (EVM.Error RealWorld, [VMTrace]) (Expr 'End, [VMTrace], VMTraceResult))
 getHEVMRet contr txData gaslimitExec = do
   let (txn, evmEnv, contrAlloc, fromAddress, toAddress, _) = evmSetup contr txData gaslimitExec
   hevmRun <- runCodeWithTrace Nothing evmEnv contrAlloc txn (fromAddress, toAddress)
@@ -402,18 +403,19 @@ deleteTraceOutputFiles evmtoolResult =
       System.Directory.removeFile (traceFileName ++ ".json")
 
 -- Create symbolic VM from concrete VM
-symbolify :: VM -> VM
+symbolify :: VM s -> VM s
 symbolify vm = vm { _state = vm._state { _calldata = AbstractBuf "calldata" } }
 
 -- | Takes a runtime code and calls it with the provided calldata
 --   Uses evmtool's alloc and transaction to set up the VM correctly
-runCodeWithTrace :: Fetch.RpcInfo -> EVMToolEnv -> EVMToolAlloc -> EVM.Transaction.Transaction -> (Addr, Addr) -> IO (Either (EVM.Error, [VMTrace]) ((Expr 'End, [VMTrace], VMTraceResult)))
+runCodeWithTrace :: Fetch.RpcInfo -> EVMToolEnv -> EVMToolAlloc -> EVM.Transaction.Transaction -> (Addr, Addr) -> IO (Either (EVM.Error RealWorld, [VMTrace]) ((Expr 'End, [VMTrace], VMTraceResult)))
 runCodeWithTrace rpcinfo evmEnv alloc txn (fromAddr, toAddress) = withSolvers Z3 0 Nothing $ \solvers -> do
-  let origVM = vmForRuntimeCode code' calldata' evmEnv alloc txn (fromAddr, toAddress)
-      calldata' = ConcreteBuf txn.txData
+  let calldata' = ConcreteBuf txn.txData
       code' = alloc.code
-      buildExpr :: SolverGroup -> VM -> IO (Expr End)
+      buildExpr :: SolverGroup -> VM RealWorld -> IO (Expr End)
       buildExpr s vm = evalStateT (interpret (Fetch.oracle s Nothing) Nothing Nothing runExpr) vm
+
+  origVM <- stToIO $ vmForRuntimeCode code' calldata' evmEnv alloc txn (fromAddr, toAddress)
 
   expr <- buildExpr solvers $ symbolify origVM
   (res, (vm, trace)) <- runStateT (interpretWithTrace (Fetch.oracle solvers rpcinfo) Stepper.execFully) (origVM, [])
@@ -421,12 +423,12 @@ runCodeWithTrace rpcinfo evmEnv alloc txn (fromAddr, toAddress) = withSolvers Z3
     Left x -> pure $ Left (x, trace)
     Right _ -> pure $ Right (expr, trace, vmres vm)
 
-vmForRuntimeCode :: ByteString -> Expr Buf -> EVMToolEnv -> EVMToolAlloc -> EVM.Transaction.Transaction -> (Addr, Addr) -> VM
+vmForRuntimeCode :: ByteString -> Expr Buf -> EVMToolEnv -> EVMToolAlloc -> EVM.Transaction.Transaction -> (Addr, Addr) -> ST s (VM s)
 vmForRuntimeCode runtimecode calldata' evmToolEnv alloc txn (fromAddr, toAddress) =
   let contr = initialContract (RuntimeCode (ConcreteRuntimeCode runtimecode))
       contrWithBal = contr { _balance = alloc.balance }
   in
-  (makeVm $ VMOpts
+  makeVm (VMOpts
     { vmoptContract = contrWithBal
     , vmoptCalldata = (calldata', [])
     , vmoptValue = Lit txn.txValue
@@ -450,24 +452,24 @@ vmForRuntimeCode runtimecode calldata' evmToolEnv alloc txn (fromAddr, toAddress
     , vmoptCreate = False
     , vmoptTxAccessList = mempty
     , vmoptAllowFFI = False
-    }) & set (EVM.env . contracts . at ethrunAddress)
+    }) <&> set (EVM.env . contracts . at ethrunAddress)
              (Just (initialContract (RuntimeCode (ConcreteRuntimeCode BS.empty))))
-       & set (state . calldata) calldata'
+       <&> set (state . calldata) calldata'
 
 runCode :: Fetch.RpcInfo -> ByteString -> Expr Buf -> IO (Maybe (Expr Buf))
 runCode rpcinfo code' calldata' = withSolvers Z3 0 Nothing $ \solvers -> do
-  let origVM = vmForRuntimeCode code' calldata' emptyEvmToolEnv emptyEVMToolAlloc EVM.Transaction.emptyTransaction (ethrunAddress, createAddress ethrunAddress 1)
-  res <- evalStateT (Stepper.interpret (Fetch.oracle solvers rpcinfo) Stepper.execFully) origVM
+  origVM <- stToIO $ vmForRuntimeCode code' calldata' emptyEvmToolEnv emptyEVMToolAlloc EVM.Transaction.emptyTransaction (ethrunAddress, createAddress ethrunAddress 1)
+  res <- (Stepper.interpret (Fetch.oracle solvers rpcinfo) origVM Stepper.execFully)
   pure $ case res of
     Left _ -> Nothing
     Right b -> Just b
 
-vmtrace :: VM -> VMTrace
+vmtrace :: forall s. VM s -> VMTrace
 vmtrace vm =
   let
     -- Convenience function to access parts of the current VM state.
     -- Arcane type signature needed to avoid monomorphism restriction.
-    the :: (b -> VM -> Const a VM) -> ((a -> Const a a) -> b) -> a
+    the :: (b -> VM s -> Const a (VM s)) -> ((a -> Const a a) -> b) -> a
     the f g = Control.Lens.view (f . g) vm
     memsize = the state memorySize
   in VMTrace { tracePc = the state EVM.pc
@@ -481,7 +483,7 @@ vmtrace vm =
              , traceError = readoutError vm._result
              }
   where
-    readoutError :: Maybe VMResult -> Maybe String
+    readoutError :: Maybe (VMResult s) -> Maybe String
     readoutError Nothing = Nothing
     readoutError (Just (VMSuccess _)) = Nothing
     readoutError (Just (VMFailure e)) = case e of
@@ -505,7 +507,7 @@ vmtrace vm =
       EVM.InvalidMemoryAccess -> Just "write protection"
       err                     -> Just $ "HEVM error: " <> show err
 
-vmres :: VM -> VMTraceResult
+vmres :: VM s -> VMTraceResult
 vmres vm =
   let
     gasUsed' = Control.Lens.view (tx . txgaslimit) vm - Control.Lens.view (state . EVM.gas) vm
@@ -520,14 +522,14 @@ vmres vm =
      , gasUsed = gasUsed'
      }
 
-type TraceState = (VM, [VMTrace])
+type TraceState s = (VM s, [VMTrace])
 
-execWithTrace :: StateT TraceState IO VMResult
+execWithTrace :: StateT (TraceState RealWorld) IO (VMResult RealWorld)
 execWithTrace = do
   _ <- runWithTrace
   fromJust <$> use (_1 . result)
 
-runWithTrace :: StateT TraceState IO VM
+runWithTrace :: StateT (TraceState RealWorld) IO (VM RealWorld)
 runWithTrace = do
   -- This is just like `exec` except for every instruction evaluated,
   -- we also increment a counter indexed by the current code location.
@@ -535,7 +537,7 @@ runWithTrace = do
   case vm0._result of
     Nothing -> do
       State.modify (\(a, b) -> (a, b ++ [vmtrace vm0]))
-      zoom _1 (State.state (runState exec1))
+      -- zoom _1 (State.state (runState exec1))
       runWithTrace
     Just (VMSuccess _) -> pure vm0
     Just (VMFailure _) -> do
@@ -547,16 +549,16 @@ runWithTrace = do
       pure vm0
 
 interpretWithTrace
-  :: Fetch.Fetcher
-  -> Stepper.Stepper a
-  -> StateT TraceState IO a
+  :: Fetch.Fetcher RealWorld
+  -> Stepper.Stepper RealWorld a
+  -> StateT (TraceState RealWorld) IO a
 interpretWithTrace fetcher =
   eval . Operational.view
 
   where
     eval
-      :: Operational.ProgramView Stepper.Action a
-      -> StateT TraceState IO a
+      :: Operational.ProgramView (Stepper.Action RealWorld) a
+      -> StateT (TraceState RealWorld) IO a
 
     eval (Operational.Return x) =
       pure x
@@ -569,13 +571,16 @@ interpretWithTrace fetcher =
           runWithTrace >>= interpretWithTrace fetcher . k
         Stepper.Wait q ->
           do m <- liftIO (fetcher q)
-             zoom _1 (State.state (runState m)) >> interpretWithTrace fetcher (k ())
+             undefined
+             -- zoom _1 (State.state (runState m)) >> interpretWithTrace fetcher (k ())
         Stepper.Ask _ ->
           error "cannot make choice in this interpreter"
         Stepper.IOAct q ->
-          zoom _1 (StateT (runStateT q)) >>= interpretWithTrace fetcher . k
+          undefined
+          -- zoom _1 (StateT (runStateT q)) >>= interpretWithTrace fetcher . k
         Stepper.EVM m ->
-          zoom _1 (State.state (runState m)) >>= interpretWithTrace fetcher . k
+          undefined
+          -- zoom _1 (State.state (runState m)) >>= interpretWithTrace fetcher . k
 
 data OpContract = OpContract [Op]
 instance Show OpContract where
@@ -789,7 +794,7 @@ forceLit _ = undefined
 randItem :: [a] -> IO a
 randItem = generate . Test.QuickCheck.elements
 
-getOp :: VM -> Data.Word.Word8
+getOp :: VM s -> Data.Word.Word8
 getOp vm =
   let pcpos  = vm ^. state . EVM.pc
       code' = vm ^. state . EVM.code

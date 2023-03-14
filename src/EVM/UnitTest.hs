@@ -61,7 +61,7 @@ import GHC.Natural
 import System.Environment (lookupEnv)
 import System.IO (hFlush, stdout)
 import Test.QuickCheck hiding (verbose)
-import Control.Monad.ST (RealWorld)
+import Control.Monad.ST (RealWorld, ST, stToIO)
 
 data UnitTestOptions s = UnitTestOptions
   { rpcInfo     :: Fetch.RpcInfo
@@ -317,8 +317,8 @@ interpretWithCoverage opts@UnitTestOptions{..} =
           runWithCoverage >>= interpretWithCoverage opts . k
         Stepper.Wait q ->
           do m <- liftIO ((Fetch.oracle solvers rpcInfo) q)
-             undefined
-             -- runStateT m >> interpretWithCoverage opts (k ())
+             -- runStateT m
+             interpretWithCoverage opts (k ())
         Stepper.Ask _ ->
           error "cannot make choice in this interpreter"
         Stepper.IOAct q ->
@@ -388,7 +388,7 @@ coverageForUnitTestContract
 
     Just theContract -> do
       -- Construct the initial VM and begin the contract's constructor
-      let vm0 = initialUnitTestVm opts theContract
+      vm0 <- stToIO $ initialUnitTestVm opts theContract
       (vm1, cov1) <-
         execStateT
           (interpretWithCoverage opts
@@ -432,7 +432,7 @@ runUnitTestContract
 
     Just theContract -> do
       -- Construct the initial VM and begin the contract's constructor
-      let vm0 = initialUnitTestVm opts theContract
+      vm0 <- stToIO $ initialUnitTestVm opts theContract
       vm1 <- EVM.Stepper.interpret (Fetch.oracle solvers rpcInfo) vm0 $ do
                Stepper.enter name
                initializeUnitTest opts theContract
@@ -960,7 +960,7 @@ makeTxCall TestVMParams{..} (cd, cdProps) = do
   vm <- get
   put $ initTx vm
 
-initialUnitTestVm :: UnitTestOptions s -> SolcContract -> VM s
+initialUnitTestVm :: UnitTestOptions s -> SolcContract -> ST s (VM s)
 initialUnitTestVm (UnitTestOptions {..}) theContract =
   let
     TestVMParams {..} = testParams
@@ -993,8 +993,7 @@ initialUnitTestVm (UnitTestOptions {..}) theContract =
       initialContract (RuntimeCode (ConcreteRuntimeCode ""))
         & set nonce 1
         & set balance testBalanceCreate
-  in vm
-    & set (env . contracts . at ethrunAddress) (Just creator)
+  in vm <&> set (env . contracts . at ethrunAddress) (Just creator)
 
 
 getParametersFromEnvironmentVariables :: Maybe Text -> IO TestVMParams

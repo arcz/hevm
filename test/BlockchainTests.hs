@@ -41,6 +41,7 @@ import Witherable (Filterable, catMaybes)
 import Test.Tasty
 import Test.Tasty.ExpectedFailure
 import Test.Tasty.HUnit
+import Control.Monad.ST (RealWorld, ST, stToIO)
 
 type Storage = Map W256 W256
 
@@ -136,8 +137,8 @@ ciProblematicTests = Map.fromList
 runVMTest :: Bool -> (String, Case) -> IO ()
 runVMTest diffmode (_name, x) =
  do
-  let vm0 = vmForCase x
-  result <- execStateT (EVM.Stepper.interpret (EVM.Fetch.zero 0 (Just 0)) . void $ EVM.Stepper.execFully) vm0
+  vm0 <- stToIO $ vmForCase x
+  result <- EVM.Stepper.interpret (EVM.Fetch.zero 0 (Just 0)) vm0 EVM.Stepper.runFully
   maybeReason <- checkExpectation diffmode x result
   case maybeReason of
     Just reason -> assertFailure reason
@@ -153,7 +154,7 @@ debugVMTest file test = do
   let x = case filter (\(name, _) -> name == test) $ Map.toList allTests of
         [(_, x')] -> x'
         _ -> error "test not found"
-  let vm0 = vmForCase x
+  vm0 <- stToIO $ vmForCase x
   result <- withSolvers Z3 0 Nothing $ \solvers ->
     TTY.runFromVM solvers Nothing Nothing emptyDapp vm0
   void $ checkExpectation True x result
@@ -164,7 +165,7 @@ splitEithers =
   . (fmap fst &&& fmap snd)
   . (fmap (preview _Left &&& preview _Right))
 
-checkStateFail :: Bool -> Case -> EVM.VM -> (Bool, Bool, Bool, Bool) -> IO String
+checkStateFail :: Bool -> Case -> EVM.VM RealWorld -> (Bool, Bool, Bool, Bool) -> IO String
 checkStateFail diff x vm (okMoney, okNonce, okData, okCode) = do
   let
     printContracts :: Map Addr (EVM.Contract, Storage) -> IO ()
@@ -197,7 +198,7 @@ checkStateFail diff x vm (okMoney, okNonce, okData, okCode) = do
     printContracts actual
   pure (unwords reason)
 
-checkExpectation :: Bool -> Case -> EVM.VM -> IO (Maybe String)
+checkExpectation :: Bool -> Case -> EVM.VM RealWorld -> IO (Maybe String)
 checkExpectation diff x vm = do
   let expectation = x.testExpectation
       (okState, b2, b3, b4, b5) = checkExpectedContracts vm expectation
@@ -224,7 +225,7 @@ checkExpectation diff x vm = do
       (EVM.RuntimeCode a', EVM.RuntimeCode b') -> a' == b'
       _ -> error "unexpected code"
 
-checkExpectedContracts :: EVM.VM -> Map Addr (EVM.Contract, Storage) -> (Bool, Bool, Bool, Bool, Bool)
+checkExpectedContracts :: EVM.VM RealWorld -> Map Addr (EVM.Contract, Storage) -> (Bool, Bool, Bool, Bool, Bool)
 checkExpectedContracts vm expected =
   let cs = zipWithStorages $ vm ^. EVM.env . EVM.contracts -- . to (fmap (clearZeroStorage.clearOrigStorage))
       expectedCs = clearStorage <$> expected
@@ -443,15 +444,15 @@ checkTx tx block prestate = do
   else
     return prestate
 
-vmForCase :: Case -> EVM.VM
+vmForCase :: Case -> ST RealWorld (EVM.VM RealWorld)
 vmForCase x =
   let
     a = x.checkContracts
     cs = Map.map fst a
     st = Map.mapKeys num $ Map.map snd a
     vm = EVM.makeVm x.testVmOpts
-      & set (EVM.env . EVM.contracts) cs
-      & set (EVM.env . EVM.storage) (ConcreteStore st)
-      & set (EVM.env . EVM.origStorage) st
+      <&> set (EVM.env . EVM.contracts) cs
+      <&> set (EVM.env . EVM.storage) (ConcreteStore st)
+      <&> set (EVM.env . EVM.origStorage) st
   in
-    initTx vm
+    initTx <$> vm

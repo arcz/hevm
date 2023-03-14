@@ -45,7 +45,7 @@ import Control.Concurrent.STM (atomically, TVar, readTVarIO, readTVar, newTVarIO
 import Control.Concurrent.Spawn
 import GHC.Conc (getNumProcessors)
 import EVM.Format (indent, formatBinary)
-import Control.Monad.ST (RealWorld)
+import Control.Monad.ST (RealWorld, stToIO, ST)
 
 data ProofResult a b c = Qed a | Cex b | Timeout c
   deriving (Show, Eq)
@@ -174,7 +174,7 @@ combineFragments fragments base = go (Lit 4) fragments (base, [])
                              s -> error $ "unsupported cd fragment: " <> show s
 
 
-abstractVM :: Maybe (Text, [AbiType]) -> [String] -> ByteString -> Maybe (Precondition s) -> StorageModel -> VM s
+abstractVM :: Maybe (Text, [AbiType]) -> [String] -> ByteString -> Maybe (Precondition s) -> StorageModel -> ST s (VM s)
 abstractVM typesignature concreteArgs contractCode maybepre storagemodel = finalVm
   where
     (calldata', calldataProps) = case typesignature of
@@ -187,15 +187,16 @@ abstractVM typesignature concreteArgs contractCode maybepre storagemodel = final
     caller' = Caller 0
     value' = CallValue 0
     code' = RuntimeCode (ConcreteRuntimeCode contractCode)
-    vm' = loadSymVM code' store caller' value' calldata' calldataProps
-    precond = case maybepre of
-                Nothing -> []
-                Just p -> [p vm']
-    finalVm = vm' & over constraints (<> precond)
+    finalVm = do
+      vm' <- loadSymVM code' store caller' value' calldata' calldataProps
+      let precond = case maybepre of
+                    Nothing -> []
+                    Just p -> [p vm']
+      pure $ vm' & over constraints (<> precond)
 
-loadSymVM :: ContractCode -> Expr Storage -> Expr EWord -> Expr EWord -> Expr Buf -> [Prop] -> VM s
-loadSymVM x initStore addr callvalue' calldata' calldataProps =
-  (makeVm $ VMOpts
+loadSymVM :: ContractCode -> Expr Storage -> Expr EWord -> Expr EWord -> Expr Buf -> [Prop] -> ST s (VM s)
+loadSymVM x initStore addr callvalue' calldata' calldataProps = do
+  makeVm (VMOpts
     { vmoptContract = initialContract x
     , vmoptCalldata = (calldata', calldataProps)
     , vmoptValue = callvalue'
@@ -219,33 +220,35 @@ loadSymVM x initStore addr callvalue' calldata' calldataProps =
     , vmoptCreate = False
     , vmoptTxAccessList = mempty
     , vmoptAllowFFI = False
-    }) & set (env . contracts . at (createAddress ethrunAddress 1))
+    }) <&> set (env . contracts . at (createAddress ethrunAddress 1))
              (Just (initialContract x))
-       & set (env . EVM.storage) initStore
+       <&> set (env . EVM.storage) initStore
 
 
 -- | Interpreter which explores all paths at branching points.
 -- returns an Expr representing the possible executions
 interpret
-  :: Fetch.Fetcher s
+  :: Fetch.Fetcher RealWorld
   -> Maybe Integer -- max iterations
   -> Maybe Integer -- ask smt iterations
-  -> Stepper s (Expr End)
-  -> StateT (VM s) IO (Expr End)
+  -> Stepper RealWorld (Expr End)
+  -> StateT (VM RealWorld) IO (Expr End)
 interpret fetcher maxIter askSmtIters =
   eval . Operational.view
 
   where
     eval
-      :: Operational.ProgramView (Stepper.Action s) (Expr End)
-      -> StateT (VM s) IO (Expr End)
+      :: Operational.ProgramView (Stepper.Action RealWorld) (Expr End)
+      -> StateT (VM RealWorld) IO (Expr End)
 
     eval (Operational.Return x) = pure x
 
     eval (action Operational.:>>= k) =
       case action of
-        Stepper.Exec ->
-          -- (State.state . runState) exec >>= interpret fetcher maxIter askSmtIters . k
+        Stepper.Exec -> do
+          vm <- get
+          xd <- liftIO $ stToIO $ runStateT exec vm
+          -- -- -- -- -- -- -- -- -- (interpret fetcher maxIter askSmtIters . k) xd
           undefined
         Stepper.Run ->
           -- (State.state . runState) run >>= interpret fetcher maxIter askSmtIters . k
@@ -292,9 +295,11 @@ interpret fetcher maxIter askSmtIters =
             -}
           undefined
 
-        Stepper.EVM m ->
-          --State.state (runState m) >>= interpret fetcher maxIter askSmtIters . k
+        Stepper.EVM m -> do
+          vm <- get
+          xd <- liftIO $ stToIO $ runStateT m vm
           undefined
+          -- () >>= interpret fetcher maxIter askSmtIters . k
 
 maxIterationsReached :: VM s -> Maybe Integer -> Maybe Bool
 maxIterationsReached _ Nothing = Nothing
@@ -351,7 +356,7 @@ panicMsg err = (selector "Panic(uint256)") <> (encodeAbiValue $ AbiUInt 256 err)
 
 verifyContract :: SolverGroup -> ByteString -> Maybe (Text, [AbiType]) -> [String] -> VeriOpts -> StorageModel -> Maybe (Precondition RealWorld) -> Maybe (Postcondition RealWorld) -> IO (Expr End, [VerifyResult])
 verifyContract solvers theCode signature' concreteArgs opts storagemodel maybepre maybepost = do
-  let preState = abstractVM signature' concreteArgs theCode maybepre storagemodel
+  preState <- stToIO $ abstractVM signature' concreteArgs theCode maybepre storagemodel
   verify solvers opts preState maybepost
 
 pruneDeadPaths :: [VM s] -> [VM s]
@@ -574,7 +579,7 @@ equivalenceCheck solvers bytecodeA bytecodeB opts signature' = do
     getBranches bs = do
       let
         bytecode = if BS.null bs then BS.pack [0] else bs
-        prestate = abstractVM signature' [] bytecode Nothing SymbolicS
+      prestate <- stToIO $ abstractVM signature' [] bytecode Nothing SymbolicS
       expr <- evalStateT (interpret (Fetch.oracle solvers Nothing) opts.maxIter opts.askSmtIters runExpr) prestate
       let simpl = if opts.simp then (Expr.simplify expr) else expr
       pure $ flattenExpr simpl

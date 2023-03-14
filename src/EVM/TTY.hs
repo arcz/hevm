@@ -53,7 +53,7 @@ import Graphics.Vty qualified as V
 import System.Console.Haskeline qualified as Readline
 import Paths_hevm qualified as Paths
 import Text.Wrap
-import Control.Monad.ST (RealWorld, stToIO)
+import Control.Monad.ST (RealWorld, stToIO, ST)
 
 data Name
   = AbiPane
@@ -449,7 +449,7 @@ appEvent (VtyEvent (V.EvKey V.KEnter [])) = get >>= \case
     case listSelectedElement s._testPickerList of
       Nothing -> error "nothing selected"
       Just (_, x) -> do
-        let initVm  = initialUiVmStateForTest s._testOpts x
+        let initVm  = undefined -- initialUiVmStateForTest s._testOpts x
         put (ViewVm initVm)
   _ -> pure ()
 
@@ -609,16 +609,16 @@ app UnitTestOptions{..} =
 initialUiVmStateForTest
   :: UnitTestOptions RealWorld
   -> (Text, Text)
-  -> UiVmState
-initialUiVmStateForTest opts@UnitTestOptions{..} (theContractName, theTestName) = initUiVmState vm0 opts script
+  -> ST RealWorld UiVmState
+initialUiVmStateForTest opts@UnitTestOptions{..} (theContractName, theTestName) = do
+  vm0 <- initialUnitTestVm opts testContract
+  pure $ initUiVmState vm0 opts script
   where
     cd = case test of
       SymbolicTest _ -> symCalldata theTestName types [] (AbstractBuf "txdata")
       _ -> (error "unreachable", error "unreachable")
     (test, types) = fromJust $ find (\(test',_) -> extractSig test' == theTestName) $ unitTestMethods testContract
     testContract = fromJust $ Map.lookup theContractName dapp.solcByName
-    vm0 =
-      initialUnitTestVm opts testContract
     script = do
       Stepper.evm . pushTrace . EntryTrace $
         "test " <> theTestName <> " (" <> theContractName <> ")"

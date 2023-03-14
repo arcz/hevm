@@ -415,7 +415,7 @@ data Block = Block
 
 blankState :: EVM s (FrameState s)
 blankState = do
-  mem <- VUnboxed.Mutable.new 0
+  mem <- VUnboxed.Mutable.replicate 100000 0
   pure $ FrameState
     { _contract     = 0
     , _codeContract = 0
@@ -488,76 +488,79 @@ currentContract vm =
 
 -- * Data constructors
 
-makeVm :: VMOpts -> VM s
-makeVm o =
+makeVm :: VMOpts -> ST s (VM s)
+makeVm o = do
   let txaccessList = o.vmoptTxAccessList
       txorigin = o.vmoptOrigin
       txtoAddr = o.vmoptAddress
       initialAccessedAddrs = fromList $ [txorigin, txtoAddr] ++ [1..9] ++ (Map.keys txaccessList)
       initialAccessedStorageKeys = fromList $ foldMap (uncurry (map . (,))) (Map.toList txaccessList)
       touched = if o.vmoptCreate then [txorigin] else [txorigin, txtoAddr]
-  in
-  VM
-  { _result = Nothing
-  , _frames = mempty
-  , _tx = TxState
-    { _gasprice = o.vmoptGasprice
-    , _txgaslimit = o.vmoptGaslimit
-    , _txPriorityFee = o.vmoptPriorityFee
-    , _origin = txorigin
-    , _toAddr = txtoAddr
-    , _value = o.vmoptValue
-    , _substate = SubState mempty touched initialAccessedAddrs initialAccessedStorageKeys mempty
-    --, _accessList = txaccessList
-    , _isCreate = o.vmoptCreate
-    , _txReversion = Map.fromList
-      [(o.vmoptAddress , o.vmoptContract )]
+
+  -- mem <- VUnboxed.Mutable.new 0
+  let size = 100000
+  mem <- VUnboxed.Mutable.replicate size 0
+  pure $ VM
+    { _result = Nothing
+    , _frames = mempty
+    , _tx = TxState
+      { _gasprice = o.vmoptGasprice
+      , _txgaslimit = o.vmoptGaslimit
+      , _txPriorityFee = o.vmoptPriorityFee
+      , _origin = txorigin
+      , _toAddr = txtoAddr
+      , _value = o.vmoptValue
+      , _substate = SubState mempty touched initialAccessedAddrs initialAccessedStorageKeys mempty
+      --, _accessList = txaccessList
+      , _isCreate = o.vmoptCreate
+      , _txReversion = Map.fromList
+        [(o.vmoptAddress , o.vmoptContract )]
+      }
+    , _logs = []
+    , _traces = Zipper.fromForest []
+    , _block = Block
+      { _coinbase = o.vmoptCoinbase
+      , _timestamp = o.vmoptTimestamp
+      , _number = o.vmoptNumber
+      , _prevRandao = o.vmoptPrevRandao
+      , _maxCodeSize = o.vmoptMaxCodeSize
+      , _gaslimit = o.vmoptBlockGaslimit
+      , _baseFee = o.vmoptBaseFee
+      , _schedule = o.vmoptSchedule
+      }
+    , _state = FrameState
+      { _pc = 0
+      , _stack = mempty
+      , _memory = ConcreteMemory mem
+      , _memorySize = 0
+      , _code = o.vmoptContract._contractcode
+      , _contract = o.vmoptAddress
+      , _codeContract = o.vmoptAddress
+      , _calldata = fst o.vmoptCalldata
+      , _callvalue = o.vmoptValue
+      , _caller = o.vmoptCaller
+      , _gas = o.vmoptGas
+      , _returndata = mempty
+      , _static = False
+      }
+    , _env = Env
+      { _sha3Crack = mempty
+      , _chainId = o.vmoptChainId
+      , _storage = if o.vmoptStorageBase == Concrete then EmptyStore else AbstractStore
+      , _origStorage = mempty
+      , _contracts = Map.fromList
+        [(o.vmoptAddress, o.vmoptContract )]
+      --, _keccakUsed = mempty
+      --, _storageModel = vmoptStorageModel o
+      }
+    , _cache = Cache mempty mempty mempty
+    , _burned = 0
+    , _constraints = snd o.vmoptCalldata
+    , _keccakEqs = mempty
+    , _iterations = mempty
+    , _allowFFI = o.vmoptAllowFFI
+    , _overrideCaller = Nothing
     }
-  , _logs = []
-  , _traces = Zipper.fromForest []
-  , _block = Block
-    { _coinbase = o.vmoptCoinbase
-    , _timestamp = o.vmoptTimestamp
-    , _number = o.vmoptNumber
-    , _prevRandao = o.vmoptPrevRandao
-    , _maxCodeSize = o.vmoptMaxCodeSize
-    , _gaslimit = o.vmoptBlockGaslimit
-    , _baseFee = o.vmoptBaseFee
-    , _schedule = o.vmoptSchedule
-    }
-  , _state = FrameState
-    { _pc = 0
-    , _stack = mempty
-    , _memory = undefined -- ConcreteStore mem
-    , _memorySize = 0
-    , _code = o.vmoptContract._contractcode
-    , _contract = o.vmoptAddress
-    , _codeContract = o.vmoptAddress
-    , _calldata = fst o.vmoptCalldata
-    , _callvalue = o.vmoptValue
-    , _caller = o.vmoptCaller
-    , _gas = o.vmoptGas
-    , _returndata = mempty
-    , _static = False
-    }
-  , _env = Env
-    { _sha3Crack = mempty
-    , _chainId = o.vmoptChainId
-    , _storage = if o.vmoptStorageBase == Concrete then EmptyStore else AbstractStore
-    , _origStorage = mempty
-    , _contracts = Map.fromList
-      [(o.vmoptAddress, o.vmoptContract )]
-    --, _keccakUsed = mempty
-    --, _storageModel = vmoptStorageModel o
-    }
-  , _cache = Cache mempty mempty mempty
-  , _burned = 0
-  , _constraints = snd o.vmoptCalldata
-  , _keccakEqs = mempty
-  , _iterations = mempty
-  , _allowFFI = o.vmoptAllowFFI
-  , _overrideCaller = Nothing
-  }
 
 -- | Initialize empty contract with given code
 initialContract :: ContractCode -> Contract
@@ -2057,7 +2060,7 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
                         (InitCode _ _) -> InitCode mempty mempty
                         a -> a
 
-                  mem <- VUnboxed.Mutable.new 0
+                  mem <- VUnboxed.Mutable.replicate 100000 0
                   zoom state $ do
                     assign gas (num xGas)
                     assign pc 0
