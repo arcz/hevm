@@ -45,6 +45,7 @@ import Control.Concurrent.STM (atomically, TVar, readTVarIO, readTVar, newTVarIO
 import Control.Concurrent.Spawn
 import GHC.Conc (getNumProcessors)
 import EVM.Format (indent, formatBinary)
+import Control.Monad.ST (RealWorld)
 
 data ProofResult a b c = Qed a | Cex b | Timeout c
   deriving (Show, Eq)
@@ -173,7 +174,7 @@ combineFragments fragments base = go (Lit 4) fragments (base, [])
                              s -> error $ "unsupported cd fragment: " <> show s
 
 
-abstractVM :: Maybe (Text, [AbiType]) -> [String] -> ByteString -> Maybe Precondition -> StorageModel -> VM
+abstractVM :: Maybe (Text, [AbiType]) -> [String] -> ByteString -> Maybe (Precondition s) -> StorageModel -> VM s
 abstractVM typesignature concreteArgs contractCode maybepre storagemodel = finalVm
   where
     (calldata', calldataProps) = case typesignature of
@@ -192,7 +193,7 @@ abstractVM typesignature concreteArgs contractCode maybepre storagemodel = final
                 Just p -> [p vm']
     finalVm = vm' & over constraints (<> precond)
 
-loadSymVM :: ContractCode -> Expr Storage -> Expr EWord -> Expr EWord -> Expr Buf -> [Prop] -> VM
+loadSymVM :: ContractCode -> Expr Storage -> Expr EWord -> Expr EWord -> Expr Buf -> [Prop] -> VM s
 loadSymVM x initStore addr callvalue' calldata' calldataProps =
   (makeVm $ VMOpts
     { vmoptContract = initialContract x
@@ -226,33 +227,37 @@ loadSymVM x initStore addr callvalue' calldata' calldataProps =
 -- | Interpreter which explores all paths at branching points.
 -- returns an Expr representing the possible executions
 interpret
-  :: Fetch.Fetcher
+  :: Fetch.Fetcher s
   -> Maybe Integer -- max iterations
   -> Maybe Integer -- ask smt iterations
-  -> Stepper (Expr End)
-  -> StateT VM IO (Expr End)
+  -> Stepper s (Expr End)
+  -> StateT (VM s) IO (Expr End)
 interpret fetcher maxIter askSmtIters =
   eval . Operational.view
 
   where
     eval
-      :: Operational.ProgramView Stepper.Action (Expr End)
-      -> StateT VM IO (Expr End)
+      :: Operational.ProgramView (Stepper.Action s) (Expr End)
+      -> StateT (VM s) IO (Expr End)
 
     eval (Operational.Return x) = pure x
 
     eval (action Operational.:>>= k) =
       case action of
         Stepper.Exec ->
-          (State.state . runState) exec >>= interpret fetcher maxIter askSmtIters . k
+          -- (State.state . runState) exec >>= interpret fetcher maxIter askSmtIters . k
+          undefined
         Stepper.Run ->
-          (State.state . runState) run >>= interpret fetcher maxIter askSmtIters . k
+          -- (State.state . runState) run >>= interpret fetcher maxIter askSmtIters . k
+          undefined
         Stepper.IOAct q ->
-          mapStateT liftIO q >>= interpret fetcher maxIter askSmtIters . k
+          -- mapStateT liftIO q >>= interpret fetcher maxIter askSmtIters . k
+          undefined
         Stepper.Ask (EVM.PleaseChoosePath cond continue) -> do
           assign result Nothing
           vm <- get
           case maxIterationsReached vm maxIter of
+            {-
             -- TODO: parallelise
             Nothing -> do
               a <- interpret fetcher maxIter askSmtIters (Stepper.evm (continue True) >>= k)
@@ -262,7 +267,10 @@ interpret fetcher maxIter askSmtIters =
             Just n ->
               -- Let's escape the loop. We give no guarantees at this point
               interpret fetcher maxIter askSmtIters (Stepper.evm (continue (not n)) >>= k)
+              -}
+          undefined
         Stepper.Wait q -> do
+          {-
           let performQuery = do
                 m <- liftIO (fetcher q)
                 interpret fetcher maxIter askSmtIters (Stepper.evm m >>= k)
@@ -281,11 +289,14 @@ interpret fetcher maxIter askSmtIters =
               else performQuery
 
             _ -> performQuery
+            -}
+          undefined
 
         Stepper.EVM m ->
-          State.state (runState m) >>= interpret fetcher maxIter askSmtIters . k
+          --State.state (runState m) >>= interpret fetcher maxIter askSmtIters . k
+          undefined
 
-maxIterationsReached :: VM -> Maybe Integer -> Maybe Bool
+maxIterationsReached :: VM s -> Maybe Integer -> Maybe Bool
 maxIterationsReached _ Nothing = Nothing
 maxIterationsReached vm (Just maxIter) =
   let codelocation = getCodeLocation vm
@@ -295,8 +306,8 @@ maxIterationsReached vm (Just maxIter) =
      else Nothing
 
 
-type Precondition = VM -> Prop
-type Postcondition = VM -> Expr End -> Prop
+type Precondition s = VM s -> Prop
+type Postcondition s = VM s -> Expr End -> Prop
 
 
 checkAssert :: SolverGroup -> [Word256] -> ByteString -> Maybe (Text, [AbiType]) -> [String] -> VeriOpts -> IO (Expr End, [VerifyResult])
@@ -321,7 +332,7 @@ checkAssert solvers errs c signature' concreteArgs opts = verifyContract solvers
 
   see: https://docs.soliditylang.org/en/v0.8.6/control-structures.html?highlight=Panic#panic-via-assert-and-error-via-require
 -}
-checkAssertions :: [Word256] -> Postcondition
+checkAssertions :: [Word256] -> Postcondition s
 checkAssertions errs _ = \case
   Revert _ (ConcreteBuf msg) -> PBool $ msg `notElem` (fmap panicMsg errs)
   Revert _ b -> foldl' PAnd (PBool True) (fmap (PNeg . PEq b . ConcreteBuf . panicMsg) errs)
@@ -338,19 +349,19 @@ allPanicCodes = [ 0x00, 0x01, 0x11, 0x12, 0x21, 0x22, 0x31, 0x32, 0x41, 0x51 ]
 panicMsg :: Word256 -> ByteString
 panicMsg err = (selector "Panic(uint256)") <> (encodeAbiValue $ AbiUInt 256 err)
 
-verifyContract :: SolverGroup -> ByteString -> Maybe (Text, [AbiType]) -> [String] -> VeriOpts -> StorageModel -> Maybe Precondition -> Maybe Postcondition -> IO (Expr End, [VerifyResult])
+verifyContract :: SolverGroup -> ByteString -> Maybe (Text, [AbiType]) -> [String] -> VeriOpts -> StorageModel -> Maybe (Precondition RealWorld) -> Maybe (Postcondition RealWorld) -> IO (Expr End, [VerifyResult])
 verifyContract solvers theCode signature' concreteArgs opts storagemodel maybepre maybepost = do
   let preState = abstractVM signature' concreteArgs theCode maybepre storagemodel
   verify solvers opts preState maybepost
 
-pruneDeadPaths :: [VM] -> [VM]
+pruneDeadPaths :: [VM s] -> [VM s]
 pruneDeadPaths =
   filter $ \vm -> case vm._result of
     Just (VMFailure DeadPath) -> False
     _ -> True
 
 -- | Stepper that parses the result of Stepper.runFully into an Expr End
-runExpr :: Stepper.Stepper (Expr End)
+runExpr :: Stepper.Stepper RealWorld (Expr End)
 runExpr = do
   vm <- Stepper.runFully
   let asserts = vm._keccakEqs
@@ -466,7 +477,7 @@ extractProps = \case
 
 
 -- | Symbolically execute the VM and check all endstates against the postcondition, if available.
-verify :: SolverGroup -> VeriOpts -> VM -> Maybe Postcondition -> IO (Expr End, [VerifyResult])
+verify :: SolverGroup -> VeriOpts -> VM RealWorld -> Maybe (Postcondition RealWorld) -> IO (Expr End, [VerifyResult])
 verify solvers opts preState maybepost = do
   putStrLn "Exploring contract"
 

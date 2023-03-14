@@ -8,15 +8,16 @@ import EVM.Expr (litAddr)
 import qualified EVM.FeeSchedule as FeeSchedule
 
 import Control.Lens
-import Control.Monad.Trans.State.Strict (get, State)
+import Control.Monad.Trans.State.Strict (get, State, StateT)
 import Data.ByteString (ByteString)
 import Data.Maybe (isNothing)
+import Control.Monad.ST (ST)
 
 
 ethrunAddress :: Addr
 ethrunAddress = Addr 0x00a329c0648769a73afac7f9381e08fb43dbea72
 
-vmForEthrunCreation :: ByteString -> VM
+vmForEthrunCreation :: ByteString -> VM s
 vmForEthrunCreation creationCode =
   (makeVm $ VMOpts
     { vmoptContract = initialContract (InitCode creationCode mempty)
@@ -45,21 +46,21 @@ vmForEthrunCreation creationCode =
     }) & set (env . contracts . at ethrunAddress)
              (Just (initialContract (RuntimeCode (ConcreteRuntimeCode ""))))
 
-exec :: State VM VMResult
+exec :: EVM s (VMResult s)
 exec = do
   vm <- get
   case vm._result of
     Nothing -> exec1 >> exec
     Just r -> pure r
 
-run :: State VM VM
+run :: EVM s (VM s)
 run = do
   vm <- get
   case vm._result of
     Nothing -> exec1 >> run
     Just _ -> pure vm
 
-execWhile :: (VM -> Bool) -> State VM Int
+execWhile :: (VM s -> Bool) -> State (VM s) Int
 execWhile p = go 0
   where
     go i = do

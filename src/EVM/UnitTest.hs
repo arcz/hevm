@@ -61,8 +61,9 @@ import GHC.Natural
 import System.Environment (lookupEnv)
 import System.IO (hFlush, stdout)
 import Test.QuickCheck hiding (verbose)
+import Control.Monad.ST (RealWorld)
 
-data UnitTestOptions = UnitTestOptions
+data UnitTestOptions s = UnitTestOptions
   { rpcInfo     :: Fetch.RpcInfo
   , solvers     :: SolverGroup
   , verbose     :: Maybe Int
@@ -76,7 +77,7 @@ data UnitTestOptions = UnitTestOptions
   , match       :: Text
   , fuzzRuns    :: Int
   , replay      :: Maybe (Text, BSLazy.ByteString)
-  , vmModifier  :: VM -> VM
+  , vmModifier  :: VM s -> VM s
   , dapp        :: DappInfo
   , testParams  :: TestVMParams
   , ffiAllowed  :: Bool
@@ -117,7 +118,7 @@ type ABIMethod = Text
 
 
 -- | Generate VeriOpts from UnitTestOptions
-makeVeriOpts :: UnitTestOptions -> VeriOpts
+makeVeriOpts :: UnitTestOptions s -> VeriOpts
 makeVeriOpts opts =
    defaultVeriOpts { SymExec.debug = opts.smtDebug
                    , SymExec.maxIter = opts.maxIter
@@ -126,7 +127,7 @@ makeVeriOpts opts =
                    }
 
 -- | Top level CLI endpoint for dapp-test
-dappTest :: UnitTestOptions -> String -> Maybe String -> IO Bool
+dappTest :: UnitTestOptions RealWorld -> String -> Maybe String -> IO Bool
 dappTest opts solcFile cache' = do
   out <- liftIO $ readSolc solcFile
   case out of
@@ -151,7 +152,7 @@ dappTest opts solcFile cache' = do
 
 -- | Assuming a constructor is loaded, this stepper will run the constructor
 -- to create the test contract, give it an initial balance, and run `setUp()'.
-initializeUnitTest :: UnitTestOptions -> SolcContract -> Stepper ()
+initializeUnitTest :: UnitTestOptions RealWorld -> SolcContract -> Stepper RealWorld ()
 initializeUnitTest UnitTestOptions { .. } theContract = do
 
   let addr = testParams.testAddress
@@ -186,12 +187,12 @@ initializeUnitTest UnitTestOptions { .. } theContract = do
 
 -- | Assuming a test contract is loaded and initialized, this stepper
 -- will run the specified test method and return whether it succeeded.
-runUnitTest :: UnitTestOptions -> ABIMethod -> AbiValue -> Stepper Bool
+runUnitTest :: UnitTestOptions RealWorld -> ABIMethod -> AbiValue -> Stepper RealWorld Bool
 runUnitTest a method args = do
   x <- execTestStepper a method args
   checkFailures a method x
 
-execTestStepper :: UnitTestOptions -> ABIMethod -> AbiValue -> Stepper Bool
+execTestStepper :: UnitTestOptions RealWorld -> ABIMethod -> AbiValue -> Stepper RealWorld Bool
 execTestStepper UnitTestOptions { .. } methodName' method = do
   -- Set up the call to the test method
   Stepper.evm $ do
@@ -203,7 +204,7 @@ execTestStepper UnitTestOptions { .. } methodName' method = do
     Left e -> Stepper.evm (pushTrace (ErrorTrace e) >> popTrace) >> pure True
     _ -> pure False
 
-exploreStep :: UnitTestOptions -> ByteString -> Stepper Bool
+exploreStep :: UnitTestOptions s -> ByteString -> Stepper s Bool
 exploreStep UnitTestOptions{..} bs = do
   Stepper.evm $ do
     cs <- use (env . contracts)
@@ -220,7 +221,7 @@ exploreStep UnitTestOptions{..} bs = do
     Left e -> Stepper.evm (pushTrace (ErrorTrace e) >> popTrace) >> pure True
     _ -> pure False
 
-checkFailures :: UnitTestOptions -> ABIMethod -> Bool -> Stepper Bool
+checkFailures :: UnitTestOptions s -> ABIMethod -> Bool -> Stepper s Bool
 checkFailures UnitTestOptions { .. } method bailed = do
    -- Decide whether the test is supposed to fail or succeed
   let shouldFail = "testFail" `isPrefixOf` method
@@ -241,10 +242,10 @@ checkFailures UnitTestOptions { .. } method bailed = do
       c -> error $ "internal error: unexpected failure code: " <> show c
 
 -- | Randomly generates the calldata arguments and runs the test
-fuzzTest :: UnitTestOptions -> Text -> [AbiType] -> VM -> Property
+fuzzTest :: UnitTestOptions RealWorld -> Text -> [AbiType] -> VM RealWorld -> Property
 fuzzTest opts@UnitTestOptions{..} sig types vm = forAllShow (genAbiValue (AbiTupleType $ Vector.fromList types)) (show . ByteStringS . encodeAbiValue)
   $ \args -> ioProperty $
-    fst <$> runStateT (EVM.Stepper.interpret (Fetch.oracle solvers rpcInfo) (runUnitTest opts sig args)) vm
+    EVM.Stepper.interpret (Fetch.oracle solvers rpcInfo) vm (runUnitTest opts sig args)
 
 tick :: Text -> IO ()
 tick x = Text.putStr x >> hFlush stdout
@@ -264,9 +265,9 @@ instance Ord OpLocation where
 srcMapForOpLocation :: DappInfo -> OpLocation -> Maybe SrcMap
 srcMapForOpLocation dapp (OpLocation contr opIx) = srcMap dapp contr opIx
 
-type CoverageState = (VM, MultiSet OpLocation)
+type CoverageState s = (VM s, MultiSet OpLocation)
 
-currentOpLocation :: VM -> OpLocation
+currentOpLocation :: VM s -> OpLocation
 currentOpLocation vm =
   case currentContract vm of
     Nothing ->
@@ -276,34 +277,34 @@ currentOpLocation vm =
         c
         (fromMaybe (error "internal error: op ix") (vmOpIx vm))
 
-execWithCoverage :: StateT CoverageState IO VMResult
+execWithCoverage :: StateT (CoverageState RealWorld) IO (VMResult RealWorld)
 execWithCoverage = do _ <- runWithCoverage
                       fromJust <$> use (_1 . result)
 
-runWithCoverage :: StateT CoverageState IO VM
+runWithCoverage :: StateT (CoverageState RealWorld) IO (VM RealWorld)
 runWithCoverage = do
   -- This is just like `exec` except for every instruction evaluated,
   -- we also increment a counter indexed by the current code location.
   vm0 <- use _1
   case vm0._result of
     Nothing -> do
-      vm1 <- zoom _1 (State.state (runState exec1) >> get)
+      vm1 <- undefined -- zoom _1 (State.state (runStateT exec1) >> get)
       zoom _2 (modify (MultiSet.insert (currentOpLocation vm1)))
       runWithCoverage
     Just _ -> pure vm0
 
 
 interpretWithCoverage
-  :: UnitTestOptions
-  -> Stepper a
-  -> StateT CoverageState IO a
+  :: UnitTestOptions RealWorld
+  -> Stepper RealWorld a
+  -> StateT (CoverageState RealWorld) IO a
 interpretWithCoverage opts@UnitTestOptions{..} =
   eval . Operational.view
 
   where
     eval
-      :: Operational.ProgramView Stepper.Action a
-      -> StateT CoverageState IO a
+      :: Operational.ProgramView (Stepper.Action RealWorld) a
+      -> StateT (CoverageState RealWorld) IO a
 
     eval (Operational.Return x) =
       pure x
@@ -316,13 +317,15 @@ interpretWithCoverage opts@UnitTestOptions{..} =
           runWithCoverage >>= interpretWithCoverage opts . k
         Stepper.Wait q ->
           do m <- liftIO ((Fetch.oracle solvers rpcInfo) q)
-             zoom _1 (State.state (runState m)) >> interpretWithCoverage opts (k ())
+             undefined
+             -- runStateT m >> interpretWithCoverage opts (k ())
         Stepper.Ask _ ->
           error "cannot make choice in this interpreter"
         Stepper.IOAct q ->
           zoom _1 (StateT (runStateT q)) >>= interpretWithCoverage opts . k
         Stepper.EVM m ->
-          zoom _1 (State.state (runState m)) >>= interpretWithCoverage opts . k
+          undefined
+          -- zoom _1 (State.state (runStateT m)) >>= interpretWithCoverage opts . k
 
 coverageReport
   :: DappInfo
@@ -369,7 +372,7 @@ coverageReport dapp cov =
     Map.mapWithKey f linesByName
 
 coverageForUnitTestContract
-  :: UnitTestOptions
+  :: (UnitTestOptions RealWorld)
   -> Map Text SolcContract
   -> SourceCache
   -> (Text, [(Test, [AbiType])])
@@ -410,10 +413,10 @@ coverageForUnitTestContract
       pure (MultiSet.mapMaybe (srcMapForOpLocation dapp) cov2)
 
 runUnitTestContract
-  :: UnitTestOptions
+  :: UnitTestOptions RealWorld
   -> Map Text SolcContract
   -> (Text, [(Test, [AbiType])])
-  -> IO [(Bool, VM)]
+  -> IO [(Bool, VM RealWorld)]
 runUnitTestContract
   opts@(UnitTestOptions {..}) contractMap (name, testSigs) = do
 
@@ -430,11 +433,10 @@ runUnitTestContract
     Just theContract -> do
       -- Construct the initial VM and begin the contract's constructor
       let vm0 = initialUnitTestVm opts theContract
-      vm1 <-
-        liftIO $ execStateT
-          (EVM.Stepper.interpret (Fetch.oracle solvers rpcInfo)
-            (Stepper.enter name >> initializeUnitTest opts theContract))
-          vm0
+      vm1 <- EVM.Stepper.interpret (Fetch.oracle solvers rpcInfo) vm0 $ do
+               Stepper.enter name
+               initializeUnitTest opts theContract
+               pure vm0
 
       case vm1._result of
         Nothing -> error "internal error: setUp() did not end with a result"
@@ -446,8 +448,8 @@ runUnitTestContract
         Just (VMSuccess _) -> do
           let
 
-            runCache :: ([(Either Text Text, VM)], VM) -> (Test, [AbiType])
-                        -> IO ([(Either Text Text, VM)], VM)
+            runCache :: ([(Either Text Text, VM RealWorld)], VM RealWorld) -> (Test, [AbiType])
+                        -> IO ([(Either Text Text, VM RealWorld)], VM RealWorld)
             runCache (results, vm) (test, types) = do
               (t, r, vm') <- runTest opts vm (test, types)
               liftIO $ Text.putStrLn t
@@ -469,7 +471,7 @@ runUnitTestContract
           pure [(isRight r, vm) | (r, vm) <- details]
 
 
-runTest :: UnitTestOptions -> VM -> (Test, [AbiType]) -> IO (Text, Either Text Text, VM)
+runTest :: UnitTestOptions RealWorld -> VM RealWorld -> (Test, [AbiType]) -> IO (Text, Either Text Text, VM RealWorld)
 runTest opts@UnitTestOptions{} vm (ConcreteTest testName, []) = liftIO $ runOne opts vm testName emptyAbi
 runTest opts@UnitTestOptions{..} vm (ConcreteTest testName, types) = liftIO $ case replay of
   Nothing ->
@@ -500,7 +502,7 @@ decodeCalls b = fromMaybe (error "could not decode replay data") $ do
     unList _ = error "fix me with better types"
 
 -- | Runs an invariant test, calls the invariant before execution begins
-initialExplorationStepper :: UnitTestOptions -> ABIMethod -> [ExploreTx] -> [Addr] -> Int -> Stepper (Bool, RLP)
+initialExplorationStepper :: UnitTestOptions RealWorld -> ABIMethod -> [ExploreTx] -> [Addr] -> Int -> Stepper RealWorld (Bool, RLP)
 initialExplorationStepper opts'' testName replayData targets i = do
   let history = List []
   x <- runUnitTest opts'' testName emptyAbi
@@ -508,7 +510,7 @@ initialExplorationStepper opts'' testName replayData targets i = do
   then explorationStepper opts'' testName replayData targets history i
   else pure (False, history)
 
-explorationStepper :: UnitTestOptions -> ABIMethod -> [ExploreTx] -> [Addr] -> RLP -> Int -> Stepper (Bool, RLP)
+explorationStepper :: UnitTestOptions RealWorld -> ABIMethod -> [ExploreTx] -> [Addr] -> RLP -> Int -> Stepper RealWorld (Bool, RLP)
 explorationStepper _ _ _ _ history 0  = return (True, history)
 explorationStepper opts@UnitTestOptions{..} testName replayData targets (List history) i = do
  (caller', target, cd, timestamp') <-
@@ -581,7 +583,7 @@ explorationStepper opts@UnitTestOptions{..} testName replayData targets (List hi
       else pure (False, List (thisCallRLP:history))
 explorationStepper _ _ _ _ _ _  = error "malformed rlp"
 
-getTargetContracts :: UnitTestOptions -> Stepper [Addr]
+getTargetContracts :: UnitTestOptions s -> Stepper s [Addr]
 getTargetContracts UnitTestOptions{..} = do
   vm <- Stepper.evm get
   let contract' = fromJust $ currentContract vm
@@ -606,21 +608,30 @@ getTargetContracts UnitTestOptions{..} = do
           in pure targets
         _ -> error "internal error: unexpected failure code"
 
-exploreRun :: UnitTestOptions -> VM -> ABIMethod -> [ExploreTx] -> IO (Text, Either Text Text, VM)
+exploreRun
+  :: UnitTestOptions RealWorld -> VM RealWorld -> ABIMethod -> [ExploreTx]
+  -> IO (Text, Either Text Text, VM RealWorld)
 exploreRun opts@UnitTestOptions{..} initialVm testName replayTxs = do
   let oracle = Fetch.oracle solvers rpcInfo
-  (targets, _) <- runStateT (EVM.Stepper.interpret oracle (getTargetContracts opts)) initialVm
+  targets <- EVM.Stepper.interpret oracle initialVm (getTargetContracts opts)
   let depth = fromMaybe 20 maxDepth
-  ((x, counterex), vm') <-
-    if null replayTxs
-    then
-    foldM (\a@((success, _), _) _ ->
-                       if success
-                       then runStateT (EVM.Stepper.interpret oracle (initialExplorationStepper opts testName [] targets depth)) initialVm
-                       else pure a)
-                       ((True, (List [])), initialVm)  -- no canonical "post vm"
-                       [0..fuzzRuns]
-    else runStateT (EVM.Stepper.interpret oracle (initialExplorationStepper opts testName replayTxs targets (length replayTxs))) initialVm
+  ((x, counterex) :: (Bool, RLP), vm' :: VM RealWorld) <-
+    if null replayTxs then
+                      undefined
+                      {-
+      foldM (\a@((success, _)) _ ->
+        if success
+          then EVM.Stepper.interpret oracle initialVm $ do
+            x <-initialExplorationStepper opts testName [] targets depth
+            pure (x, initialVm)
+          else pure a)
+        ((True, (List [])))  -- no canonical "post vm"
+        [0..fuzzRuns]
+        -}
+    else EVM.Stepper.interpret oracle initialVm $ do
+      (,) <$> initialExplorationStepper opts testName replayTxs targets (length replayTxs)
+          <*> Stepper.evm get
+
   if x
   then return ("\x1b[32m[PASS]\x1b[0m " <> testName <>  " (runs: " <> (pack $ show fuzzRuns) <>", depth: " <> pack (show depth) <> ")",
                Right (passOutput vm' opts testName), vm') -- no canonical "post vm"
@@ -629,20 +640,21 @@ exploreRun opts@UnitTestOptions{..} initialVm testName replayTxs = do
                         else " (replayed)"
        in return ("\x1b[31m[FAIL]\x1b[0m " <> testName <> replayText, Left  (failOutput vm' opts testName), vm')
 
-execTest :: UnitTestOptions -> VM -> ABIMethod -> AbiValue -> IO (Bool, VM)
+execTest :: UnitTestOptions RealWorld -> VM RealWorld -> ABIMethod -> AbiValue -> IO (Bool, VM RealWorld)
 execTest opts@UnitTestOptions{..} vm testName args =
-  runStateT
-    (EVM.Stepper.interpret (Fetch.oracle solvers rpcInfo) (execTestStepper opts testName args))
-    vm
+  EVM.Stepper.interpret (Fetch.oracle solvers rpcInfo) vm $ do
+    b <- execTestStepper opts testName args
+    pure (b, vm)
 
 -- | Define the thread spawner for normal test cases
-runOne :: UnitTestOptions -> VM -> ABIMethod -> AbiValue -> IO (Text, Either Text Text, VM)
+runOne :: UnitTestOptions RealWorld -> VM RealWorld -> ABIMethod -> AbiValue -> IO (Text, Either Text Text, VM RealWorld)
 runOne opts@UnitTestOptions{..} vm testName args = do
   let argInfo = pack (if args == emptyAbi then "" else " with arguments: " <> show args)
   (bailed, vm') <- execTest opts vm testName args
   (success, vm'') <-
-    runStateT
-      (EVM.Stepper.interpret (Fetch.oracle solvers rpcInfo) (checkFailures opts testName bailed)) vm'
+    EVM.Stepper.interpret (Fetch.oracle solvers rpcInfo) vm' $ do
+      a <- checkFailures opts testName bailed
+      pure (a, vm')
   if success
   then
      let gasSpent = num testParams.testGasCall - vm'._state._gas
@@ -670,7 +682,7 @@ runOne opts@UnitTestOptions{..} vm testName args = do
           )
 
 -- | Define the thread spawner for property based tests
-fuzzRun :: UnitTestOptions -> VM -> Text -> [AbiType] -> IO (Text, Either Text Text, VM)
+fuzzRun :: UnitTestOptions RealWorld -> VM RealWorld -> Text -> [AbiType] -> IO (Text, Either Text Text, VM RealWorld)
 fuzzRun opts@UnitTestOptions{..} vm testName types = do
   let args = Args{ replay          = Nothing
                  , maxSuccess      = fuzzRuns
@@ -693,7 +705,7 @@ fuzzRun opts@UnitTestOptions{..} vm testName types = do
           ppOutput = pack $ show abiValue
       in do
         -- Run the failing test again to get a proper trace
-        vm' <- execStateT (EVM.Stepper.interpret (Fetch.oracle solvers rpcInfo) (runUnitTest opts testName abiValue)) vm
+        vm' :: VM RealWorld <- EVM.Stepper.interpret (Fetch.oracle solvers rpcInfo) vm (runUnitTest opts testName abiValue >> Stepper.evm get)
         pure ("\x1b[31m[FAIL]\x1b[0m "
                <> testName <> ". Counterexample: " <> ppOutput
                <> "\nRun:\n dapp test --replay '(\"" <> testName <> "\",\""
@@ -709,7 +721,7 @@ fuzzRun opts@UnitTestOptions{..} vm testName types = do
               )
 
 -- | Define the thread spawner for symbolic tests
-symRun :: UnitTestOptions -> VM -> Text -> [AbiType] -> IO (Text, Either Text Text, VM)
+symRun :: UnitTestOptions RealWorld -> VM RealWorld -> Text -> [AbiType] -> IO (Text, Either Text Text, VM RealWorld)
 symRun opts@UnitTestOptions{..} vm testName types = do
     let cd = symCalldata testName types [] (AbstractBuf "txdata")
         shouldFail = "proveFail" `isPrefixOf` testName
@@ -729,11 +741,11 @@ symRun opts@UnitTestOptions{..} vm testName types = do
                                    Return _ _ store -> PNeg (failed store)
                                    _ -> PBool False
 
-    (_, vm') <- runStateT
-      (EVM.Stepper.interpret (Fetch.oracle solvers rpcInfo) (Stepper.evm $ do
-          popTrace
-          makeTxCall testParams cd
-        )) vm
+    vm' <- EVM.Stepper.interpret (Fetch.oracle solvers rpcInfo) vm $
+      Stepper.evm $ do
+        popTrace
+        makeTxCall testParams cd
+        get
 
     -- check postconditions against vm
     (_, results) <- verify solvers (makeVeriOpts opts) vm' (Just postcondition)
@@ -747,7 +759,7 @@ symRun opts@UnitTestOptions{..} vm testName types = do
       let y = symFailure opts testName (fst cd) types x
       return ("\x1b[31m[FAIL]\x1b[0m " <> testName, Left y, vm)
 
-symFailure :: UnitTestOptions -> Text -> Expr Buf -> [AbiType] -> [(Expr End, SMTCex)] -> Text
+symFailure :: UnitTestOptions s -> Text -> Expr Buf -> [AbiType] -> [(Expr End, SMTCex)] -> Text
 symFailure UnitTestOptions {..} testName cd types failures' =
   mconcat
     [ "Failure: "
@@ -803,7 +815,7 @@ showVal v = Text.pack . show $ v
 --     cd -> mapM (SBV.getValue . fromSized) (take cdlen' cd) <&> BS.pack
 --   pure $ (head (Text.splitOn "(" sig)) <> showCall types (ConcreteBuffer cd)
 
-execSymTest :: UnitTestOptions -> ABIMethod -> (Expr Buf, [Prop]) -> Stepper (Expr End)
+execSymTest :: UnitTestOptions RealWorld -> ABIMethod -> (Expr Buf, [Prop]) -> Stepper RealWorld (Expr End)
 execSymTest UnitTestOptions{ .. } method cd = do
   -- Set up the call to the test method
   Stepper.evm $ do
@@ -812,7 +824,7 @@ execSymTest UnitTestOptions{ .. } method cd = do
   -- Try running the test method
   runExpr
 
-checkSymFailures :: UnitTestOptions -> Stepper VM
+checkSymFailures :: UnitTestOptions s -> Stepper RealWorld (VM RealWorld)
 checkSymFailures UnitTestOptions { .. } = do
   -- Ask whether any assertions failed
   Stepper.evm $ do
@@ -825,7 +837,7 @@ indentLines n s =
   let p = Text.replicate n " "
   in Text.unlines (map (p <>) (Text.lines s))
 
-passOutput :: VM -> UnitTestOptions -> Text -> Text
+passOutput :: VM s -> UnitTestOptions s -> Text -> Text
 passOutput vm UnitTestOptions { .. } testName =
   let ?context = DappContext { info = dapp, env = vm._env._contracts }
   in let v = fromMaybe 0 verbose
@@ -841,7 +853,7 @@ passOutput vm UnitTestOptions { .. } testName =
     else ""
 
 -- TODO
-failOutput :: VM -> UnitTestOptions -> Text -> Text
+failOutput :: VM s -> UnitTestOptions s -> Text -> Text
 failOutput vm UnitTestOptions { .. } testName =
   let ?context = DappContext { info = dapp, env = vm._env._contracts}
   in mconcat
@@ -926,14 +938,14 @@ formatTestLog events (LogEntry _ args (topic:_)) =
                   _ -> Nothing
               _ -> Just "<symbolic decimal>"
 
-abiCall :: TestVMParams -> Either (Text, AbiValue) ByteString -> EVM ()
+abiCall :: TestVMParams -> Either (Text, AbiValue) ByteString -> EVM s ()
 abiCall params args =
   let cd = case args of
         Left (sig, args') -> abiMethod sig args'
         Right b -> b
   in makeTxCall params (ConcreteBuf cd, [])
 
-makeTxCall :: TestVMParams -> (Expr Buf, [Prop]) -> EVM ()
+makeTxCall :: TestVMParams -> (Expr Buf, [Prop]) -> EVM s ()
 makeTxCall TestVMParams{..} (cd, cdProps) = do
   resetState
   assign (tx . isCreate) False
@@ -948,7 +960,7 @@ makeTxCall TestVMParams{..} (cd, cdProps) = do
   vm <- get
   put $ initTx vm
 
-initialUnitTestVm :: UnitTestOptions -> SolcContract -> VM
+initialUnitTestVm :: UnitTestOptions s -> SolcContract -> VM s
 initialUnitTestVm (UnitTestOptions {..}) theContract =
   let
     TestVMParams {..} = testParams

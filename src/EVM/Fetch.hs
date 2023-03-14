@@ -173,18 +173,18 @@ fetchSlotFrom n url addr slot =
   Session.withAPISession
     (\s -> fetchSlotWithSession n url s addr slot)
 
-http :: Natural -> Maybe Natural -> BlockNumber -> Text -> Fetcher
+http :: Natural -> Maybe Natural -> BlockNumber -> Text -> Fetcher s
 http smtjobs smttimeout n url q =
   withSolvers Z3 smtjobs smttimeout $ \s ->
     oracle s (Just (n, url)) q
 
-zero :: Natural -> Maybe Natural -> Fetcher
+zero :: Natural -> Maybe Natural -> Fetcher s
 zero smtjobs smttimeout q =
   withSolvers Z3 smtjobs smttimeout $ \s ->
     oracle s Nothing q
 
 -- smtsolving + (http or zero)
-oracle :: SolverGroup -> RpcInfo -> Fetcher
+oracle :: forall s. SolverGroup -> RpcInfo -> Fetcher s
 oracle solvers info q = do
   case q of
     EVM.PleaseDoFFI vals continue -> case vals of
@@ -228,14 +228,14 @@ oracle solvers info q = do
 
     EVM.PleaseFetchSlot addr slot continue ->
       case info of
-        Nothing -> return (continue 0)
+        Nothing -> undefined -- return (continue 0)
         Just (n, url) ->
          fetchSlotFrom n url addr (fromIntegral slot) >>= \case
            Just x  -> return (continue x)
            Nothing ->
              error ("oracle error: " ++ show q)
 
-type Fetcher = EVM.Query -> IO (EVM ())
+type Fetcher s = EVM.Query s -> IO (EVM s ())
 
 -- | Checks which branches are satisfiable, checking the pathconditions for consistency
 -- if the third argument is true.

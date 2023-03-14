@@ -32,7 +32,7 @@ module EVM.Facts
   , fileToFact
   ) where
 
-import EVM          (VM, Contract, Cache)
+import EVM          (VM, Contract, Cache, EVM)
 import EVM          (balance, nonce, storage, bytecode, env, contracts, cache, fetchedStorage, fetchedContracts)
 import EVM.Types    (Addr, W256, Expr(..), num)
 import EVM.Expr     (writeStorage, litAddr)
@@ -42,7 +42,7 @@ import qualified EVM
 import Prelude hiding (Word)
 
 import Control.Lens    (view, set, at, ix, (&), over, assign)
-import Control.Monad.State.Strict (execState, when)
+import Control.Monad.State.Strict (execState, when, execStateT)
 import Data.ByteString (ByteString)
 import Data.Ord        (comparing)
 import Data.Set        (Set)
@@ -139,7 +139,7 @@ cacheFacts c = Set.fromList $ do
   (k, v) <- Map.toList c._fetchedContracts
   contractFacts k v c._fetchedStorage
 
-vmFacts :: VM -> Set Fact
+vmFacts :: VM s -> Set Fact
 vmFacts vm = Set.fromList $ do
   (k, v) <- Map.toList vm._env._contracts
   case vm._env._storage of
@@ -154,12 +154,12 @@ vmFacts vm = Set.fromList $ do
 -- the code hash and so on).
 --
 -- Therefore, we need to make sure to sort the fact set in such a way.
-apply1 :: VM -> Fact -> VM
+apply1 :: VM s -> Fact -> VM s
 apply1 vm fact =
   case fact of
     CodeFact    {..} -> flip execState vm $ do
       assign (env . contracts . at addr) (Just (EVM.initialContract (EVM.RuntimeCode (EVM.ConcreteRuntimeCode blob))))
-      when (vm._state._contract == addr) $ EVM.loadContract addr
+      when (vm._state._contract == addr) $ undefined --EVM.loadContract addr
     StorageFact {..} ->
       vm & over (env . storage) (writeStorage (litAddr addr) (Lit which) (Lit what))
     BalanceFact {..} ->
@@ -167,12 +167,12 @@ apply1 vm fact =
     NonceFact   {..} ->
       vm & set (env . contracts . ix addr . nonce) what
 
-apply2 :: VM -> Fact -> VM
+apply2 :: VM s -> Fact -> VM s
 apply2 vm fact =
   case fact of
     CodeFact    {..} -> flip execState vm $ do
       assign (cache . fetchedContracts . at addr) (Just (EVM.initialContract (EVM.RuntimeCode (EVM.ConcreteRuntimeCode blob))))
-      when (vm._state._contract == addr) $ EVM.loadContract addr
+      when (vm._state._contract == addr) $ undefined --EVM.loadContract addr
     StorageFact {..} -> let
         store = vm._cache._fetchedStorage
         ctrct = Map.findWithDefault Map.empty (num addr) store
@@ -194,13 +194,13 @@ instance Ord Fact where
     f (StorageFact a _ x) = (3, a, x)
 
 -- Applies a set of facts to a VM.
-apply :: VM -> Set Fact -> VM
+apply :: VM s -> Set Fact -> VM s
 apply =
   -- The set's ordering is relevant; see `apply1`.
   foldl apply1
 --
 -- Applies a set of facts to a VM.
-applyCache :: VM -> Set Fact -> VM
+applyCache :: VM s -> Set Fact -> VM s
 applyCache =
   -- The set's ordering is relevant; see `apply1`.
   foldl apply2

@@ -246,7 +246,7 @@ setupTx origin coinbase gasPrice gasLimit prestate =
 -- | Given a valid tx loaded into the vm state,
 -- subtract gas payment from the origin, increment the nonce
 -- and pay receiving address
-initTx :: EVM.VM -> EVM.VM
+initTx :: EVM.VM s -> EVM.VM s
 initTx vm = let
     toAddr   = vm._state._contract
     origin   = vm._tx._origin

@@ -140,7 +140,7 @@ extractSig (ConcreteTest sig) = sig
 extractSig (SymbolicTest sig) = sig
 extractSig (InvariantTest sig) = sig
 
-traceSrcMap :: DappInfo -> Trace -> Maybe SrcMap
+traceSrcMap :: DappInfo -> Trace s -> Maybe SrcMap
 traceSrcMap dapp trace = srcMap dapp trace._traceContract trace._traceOpIx
 
 srcMap :: DappInfo -> Contract -> Int -> Maybe SrcMap
@@ -180,7 +180,7 @@ compareCode raw (Code template locs) =
       refined = foldr (\(start, len) acc -> insert start len acc) raw holes'
   in BS.length raw == BS.length template && template == refined
 
-showTraceLocation :: DappInfo -> Trace -> Either Text Text
+showTraceLocation :: DappInfo -> Trace s -> Either Text Text
 showTraceLocation dapp trace =
   case traceSrcMap dapp trace of
     Nothing -> Left "<no source map>"

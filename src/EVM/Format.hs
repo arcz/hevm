@@ -181,7 +181,7 @@ formatSBinary (ConcreteBuf bs) = formatBinary bs
 formatSBinary (AbstractBuf t) = "<" <> t <> " abstract buf>"
 formatSBinary _ = error "formatSBinary: implement me"
 
-showTraceTree :: DappInfo -> VM -> Text
+showTraceTree :: DappInfo -> VM s -> Text
 showTraceTree dapp vm =
   let forest = traceForest vm
       traces = fmap (fmap (unpack . showTrace dapp vm)) forest
@@ -190,7 +190,7 @@ showTraceTree dapp vm =
 unindexed :: [(Text, AbiType, Indexed)] -> [AbiType]
 unindexed ts = [t | (_, t, NotIndexed) <- ts]
 
-showTrace :: DappInfo -> VM -> Trace -> Text
+showTrace :: DappInfo -> VM s -> Trace s -> Text
 showTrace dapp vm trace =
   let ?context = DappContext { info = dapp, env = vm._env._contracts }
   in let

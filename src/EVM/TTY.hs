@@ -53,6 +53,7 @@ import Graphics.Vty qualified as V
 import System.Console.Haskeline qualified as Readline
 import Paths_hevm qualified as Paths
 import Text.Wrap
+import Control.Monad.ST (RealWorld, stToIO)
 
 data Name
   = AbiPane
@@ -67,19 +68,22 @@ data Name
 
 type UiWidget = Widget Name
 
+type FrozenMemory = Expr Buf
+
 data UiVmState = UiVmState
-  { _uiVm           :: VM
+  -- { _uiVm           :: (VM RealWorld, FrozenMemory)
+  { _uiVm           :: VM RealWorld
   , _uiStep         :: Int
-  , _uiSnapshots    :: Map Int (VM, Stepper ())
-  , _uiStepper      :: Stepper ()
+  , _uiSnapshots    :: Map Int (VM RealWorld, Stepper RealWorld ())
+  , _uiStepper      :: Stepper RealWorld ()
   , _uiShowMemory   :: Bool
-  , _uiTestOpts     :: UnitTestOptions
+  , _uiTestOpts     :: UnitTestOptions RealWorld
   }
 
 data UiTestPickerState = UiTestPickerState
   { _testPickerList :: List Name (Text, Text)
   , _testPickerDapp :: DappInfo
-  , _testOpts       :: UnitTestOptions
+  , _testOpts       :: UnitTestOptions RealWorld
   }
 
 data UiBrowserState = UiBrowserState
@@ -106,23 +110,23 @@ type Pred a = a -> Bool
 
 data StepMode
   = Step !Int                  -- ^ Run a specific number of steps
-  | StepUntil (Pred VM)        -- ^ Finish when a VM predicate holds
+  | StepUntil (Pred (VM RealWorld))        -- ^ Finish when a VM predicate holds
 
 -- | Each step command in the terminal should finish immediately
 -- with one of these outcomes.
-data Continuation a
+data Continuation s a
      = Stopped a              -- ^ Program finished
-     | Continue (Stepper a)   -- ^ Took one step; more steps to go
+     | Continue (Stepper s a)   -- ^ Took one step; more steps to go
 
 
 -- | This turns a @Stepper@ into a state action usable
 -- from within the TTY loop, yielding a @StepOutcome@ depending on the @StepMode@.
 interpret
-  :: (?fetcher :: Fetcher
+  :: (?fetcher :: Fetcher RealWorld
   ,   ?maxIter :: Maybe Integer)
   => StepMode
-  -> Stepper a
-  -> StateT UiVmState IO (Continuation a)
+  -> Stepper RealWorld a
+  -> StateT UiVmState IO (Continuation RealWorld a)
 interpret mode =
 
   -- Like the similar interpreters in @EVM.UnitTest@ and @EVM.VMTest@,
@@ -131,8 +135,8 @@ interpret mode =
   eval . Operational.view
   where
     eval
-      :: Operational.ProgramView Stepper.Action a
-      -> StateT UiVmState IO (Continuation a)
+      :: Operational.ProgramView (Stepper.Action RealWorld) a
+      -> StateT UiVmState IO (Continuation RealWorld a)
 
     eval (Operational.Return x) =
       pure (Stopped x)
@@ -168,7 +172,10 @@ interpret mode =
           vm <- use uiVm
           case maxIterationsReached vm ?maxIter of
             Nothing -> pure $ Continue (k ())
-            Just n -> interpret mode (Stepper.evm (cont (not n)) >>= k)
+            Just n -> do
+              xd <- liftIO $ stToIO $ runStateT (cont (not n)) vm
+              undefined
+              -- interpret mode (Stepper.evm () >>= k)
 
         -- Stepper wants to make a query and wait for the results?
         Stepper.Wait q -> do
@@ -182,15 +189,15 @@ interpret mode =
         -- Stepper wants to modify the VM.
         Stepper.EVM m -> do
           vm <- use uiVm
-          let (r, vm1) = runState m vm
+          (r, vm1) <- liftIO $ stToIO $ runStateT m vm
           assign uiVm vm1
           interpret mode (Stepper.exec >> (k r))
 
-keepExecuting :: (?fetcher :: Fetcher
+keepExecuting :: (?fetcher :: Fetcher RealWorld
               ,   ?maxIter :: Maybe Integer)
               => StepMode
-              -> Stepper a
-              -> StateT UiVmState IO (Continuation a)
+              -> Stepper RealWorld a
+              -> StateT UiVmState IO (Continuation RealWorld a)
 keepExecuting mode restart = case mode of
   Step 0 -> do
     -- We come here when we've continued while stepping,
@@ -223,7 +230,7 @@ mkVty = do
   V.setMode (V.outputIface vty) V.BracketedPaste True
   return vty
 
-runFromVM :: SolverGroup -> Fetch.RpcInfo -> Maybe Integer -> DappInfo -> VM -> IO VM
+runFromVM :: SolverGroup -> Fetch.RpcInfo -> Maybe Integer -> DappInfo -> VM RealWorld -> IO (VM RealWorld)
 runFromVM solvers rpcInfo maxIter' dappinfo vm = do
 
   let
@@ -255,7 +262,7 @@ runFromVM solvers rpcInfo maxIter' dappinfo vm = do
     _ -> error "internal error: customMain returned prematurely"
 
 
-initUiVmState :: VM -> UnitTestOptions -> Stepper () -> UiVmState
+initUiVmState :: VM RealWorld -> UnitTestOptions RealWorld -> Stepper RealWorld () -> UiVmState
 initUiVmState vm0 opts script =
   UiVmState
     { _uiVm           = vm0
@@ -269,7 +276,7 @@ initUiVmState vm0 opts script =
 
 -- filters out fuzztests, unless they have
 -- explicitly been given an argument by `replay`
-debuggableTests :: UnitTestOptions -> (Text, [(Test, [AbiType])]) -> [(Text, Text)]
+debuggableTests :: UnitTestOptions RealWorld -> (Text, [(Test, [AbiType])]) -> [(Text, Text)]
 debuggableTests UnitTestOptions{..} (contractname, tests) = case replay of
   Nothing -> [(contractname, extractSig $ fst x) | x <- tests, not $ isFuzzTest x]
   Just (sig, _) -> [(contractname, extractSig $ fst x) | x <- tests, not (isFuzzTest x) || extractSig (fst x) == sig]
@@ -280,7 +287,7 @@ isFuzzTest (ConcreteTest _, []) = False
 isFuzzTest (ConcreteTest _, _) = True
 isFuzzTest (InvariantTest _, _) = True
 
-main :: UnitTestOptions -> FilePath -> FilePath -> IO ()
+main :: UnitTestOptions RealWorld -> FilePath -> FilePath -> IO ()
 main opts root jsonFilePath =
   readSolc jsonFilePath >>=
     \case
@@ -306,7 +313,7 @@ main opts root jsonFilePath =
         return ()
 
 takeStep
-  :: (?fetcher :: Fetcher
+  :: (?fetcher :: Fetcher RealWorld
      ,?maxIter :: Maybe Integer)
   => UiVmState
   -> StepMode
@@ -322,9 +329,9 @@ takeStep ui mode =
     nxt = runStateT m ui
 
 backstepUntil
-  :: (?fetcher :: Fetcher
+  :: (?fetcher :: Fetcher RealWorld
      ,?maxIter :: Maybe Integer)
-  => (UiVmState -> Pred VM) -> EventM n UiState ()
+  => (UiVmState -> Pred (VM RealWorld)) -> EventM n UiState ()
 backstepUntil p = get >>= \case
   ViewVm s ->
     case s._uiStep of
@@ -357,7 +364,7 @@ backstepUntil p = get >>= \case
   _ -> pure ()
 
 backstep
-  :: (?fetcher :: Fetcher
+  :: (?fetcher :: Fetcher RealWorld
      ,?maxIter :: Maybe Integer)
   => UiVmState -> IO UiVmState
 backstep s =
@@ -385,7 +392,7 @@ backstep s =
           _ -> error "unexpected end"
 
 appEvent
-  :: (?fetcher::Fetcher, ?maxIter :: Maybe Integer) =>
+  :: (?fetcher::Fetcher RealWorld, ?maxIter :: Maybe Integer) =>
   BrickEvent Name e ->
   EventM Name UiState ()
 
@@ -587,7 +594,7 @@ appEvent (VtyEvent e) = do
 -- Default
 appEvent _ = pure ()
 
-app :: UnitTestOptions -> App UiState () Name
+app :: UnitTestOptions RealWorld -> App UiState () Name
 app UnitTestOptions{..} =
   let ?fetcher = Fetch.oracle solvers rpcInfo
       ?maxIter = maxIter
@@ -600,7 +607,7 @@ app UnitTestOptions{..} =
   }
 
 initialUiVmStateForTest
-  :: UnitTestOptions
+  :: UnitTestOptions RealWorld
   -> (Text, Text)
   -> UiVmState
 initialUiVmStateForTest opts@UnitTestOptions{..} (theContractName, theTestName) = initUiVmState vm0 opts script
@@ -792,17 +799,17 @@ drawHelpBar = hBorder <=> hCenter help
       , ("h", "more help")
       ]
 
-stepOneOpcode :: Stepper a -> StateT UiVmState IO ()
+stepOneOpcode :: Stepper RealWorld a -> StateT UiVmState IO ()
 stepOneOpcode restart = do
   n <- use uiStep
   when (n > 0 && n `mod` snapshotInterval == 0) $ do
     vm <- use uiVm
     modifying uiSnapshots (insert n (vm, void restart))
-  modifying uiVm (execState exec1)
+  -- modifying uiVm (execState exec1)
   modifying uiStep (+ 1)
 
 isNewTraceAdded
-  :: UiVmState -> Pred VM
+  :: UiVmState -> Pred (VM RealWorld)
 isNewTraceAdded ui vm =
   let
     currentTraceTree = length <$> traceForest ui._uiVm
@@ -810,14 +817,14 @@ isNewTraceAdded ui vm =
   in currentTraceTree /= newTraceTree
 
 isNextSourcePosition
-  :: UiVmState -> Pred VM
+  :: UiVmState -> Pred (VM RealWorld)
 isNextSourcePosition ui vm =
   let dapp = ui._uiTestOpts.dapp
       initialPosition = currentSrcMap dapp ui._uiVm
   in currentSrcMap dapp vm /= initialPosition
 
 isNextSourcePositionWithoutEntering
-  :: UiVmState -> Pred VM
+  :: UiVmState -> Pred (VM RealWorld)
 isNextSourcePositionWithoutEntering ui vm =
   let
     dapp            = ui._uiTestOpts.dapp
@@ -841,10 +848,10 @@ isNextSourcePositionWithoutEntering ui vm =
         in
            moved && not deeper && not boring
 
-isExecutionHalted :: UiVmState -> Pred VM
+isExecutionHalted :: UiVmState -> Pred (VM RealWorld)
 isExecutionHalted _ vm = isJust vm._result
 
-currentSrcMap :: DappInfo -> VM -> Maybe SrcMap
+currentSrcMap :: DappInfo -> (VM RealWorld) -> Maybe SrcMap
 currentSrcMap dapp vm = do
   this <- currentContract vm
   i <- this._opIxMap SVec.!? vm._state._pc
@@ -869,7 +876,7 @@ drawStackPane ui =
       False
       stackList
 
-message :: VM -> String
+message :: VM RealWorld -> String
 message vm =
   case vm._result of
     Just (VMSuccess (ConcreteBuf msg)) ->
@@ -938,7 +945,7 @@ drawTracePane s =
         <=> hBorderWithLabel (txt "Path Conditions")
         <=> (ourWrap $ show $ vm._constraints)
         <=> hBorderWithLabel (txt "Memory")
-        <=> (ourWrap (prettyIfConcrete vm._state._memory))
+        -- <=> (ourWrap (prettyIfConcrete vm._state._memory))
     False ->
       hBorderWithLabel (txt "Trace")
       <=> renderList
@@ -956,7 +963,7 @@ ourWrap = strWrapWith settings
       , fillScope = FillAfterFirst
       }
 
-solidityList :: VM -> DappInfo -> List Name (Int, ByteString)
+solidityList :: VM RealWorld -> DappInfo -> List Name (Int, ByteString)
 solidityList vm dapp =
   list SolidityPane
     (case currentSrcMap dapp vm of

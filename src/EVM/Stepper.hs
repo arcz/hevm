@@ -27,63 +27,62 @@ where
 import Prelude hiding (fail)
 
 import Control.Monad.Operational (Program, singleton, view, ProgramViewT(..), ProgramView)
-import Control.Monad.State.Strict (runState, liftIO, StateT)
-import qualified Control.Monad.State.Class as State
-import qualified EVM.Exec
+import Control.Monad.State.Strict (StateT (runStateT), execStateT)
+import Control.Monad.ST (stToIO)
+import Control.Monad.ST.Strict (RealWorld)
 import Data.Text (Text)
+
+import EVM hiding (result)
+import EVM.Exec qualified
+import EVM.Fetch qualified as Fetch
 import EVM.Types (Expr, EType(..))
 
-import EVM (EVM, VM, VMResult (VMFailure, VMSuccess), Error (Query, Choose), Query, Choose)
-import qualified EVM
-
-import qualified EVM.Fetch as Fetch
-
 -- | The instruction type of the operational monad
-data Action a where
+data Action s a where
 
   -- | Keep executing until an intermediate result is reached
-  Exec ::           Action VMResult
+  Exec :: Action s (VMResult s)
 
   -- | Keep executing until an intermediate state is reached
-  Run ::             Action VM
+  Run :: Action s (VM s)
 
   -- | Wait for a query to be resolved
-  Wait :: Query -> Action ()
+  Wait :: Query s -> Action s ()
 
   -- | Multiple things can happen
-  Ask :: Choose -> Action ()
+  Ask :: Choose s -> Action s ()
 
   -- | Embed a VM state transformation
-  EVM  :: EVM a -> Action a
+  EVM  :: EVM s a -> Action s a
 
   -- | Perform an IO action
-  IOAct :: StateT VM IO a -> Action a -- they should all just be this?
+  IOAct :: StateT (VM s) IO a -> Action s a -- they should all just be this?
 
 -- | Type alias for an operational monad of @Action@
-type Stepper a = Program Action a
+type Stepper s a = Program (Action s) a
 
 -- Singleton actions
 
-exec :: Stepper VMResult
+exec :: Stepper s (VMResult s)
 exec = singleton Exec
 
-run :: Stepper VM
+run :: Stepper s (VM s)
 run = singleton Run
 
-wait :: Query -> Stepper ()
+wait :: Query s -> Stepper s ()
 wait = singleton . Wait
 
-ask :: Choose -> Stepper ()
+ask :: Choose s -> Stepper s ()
 ask = singleton . Ask
 
-evm :: EVM a -> Stepper a
+evm :: EVM s a -> Stepper s a
 evm = singleton . EVM
 
-evmIO :: StateT VM IO a -> Stepper a
+evmIO :: StateT (VM s) IO a -> Stepper s a
 evmIO = singleton . IOAct
 
 -- | Run the VM until final result, resolving all queries
-execFully :: Stepper (Either Error (Expr Buf))
+execFully :: Stepper s (Either (Error s) (Expr Buf))
 execFully =
   exec >>= \case
     VMFailure (Query q) ->
@@ -96,7 +95,7 @@ execFully =
       pure (Right x)
 
 -- | Run the VM until its final state
-runFully :: Stepper EVM.VM
+runFully :: Stepper s (VM s)
 runFully = do
   vm <- run
   case vm._result of
@@ -108,41 +107,45 @@ runFully = do
     Just _ ->
       pure vm
 
-entering :: Text -> Stepper a -> Stepper a
+entering :: Text -> Stepper s a -> Stepper s a
 entering t stepper = do
   evm (EVM.pushTrace (EVM.EntryTrace t))
   x <- stepper
   evm EVM.popTrace
   pure x
 
-enter :: Text -> Stepper ()
+enter :: Text -> Stepper s ()
 enter t = evm (EVM.pushTrace (EVM.EntryTrace t))
 
-interpret :: Fetch.Fetcher -> Stepper a -> StateT VM IO a
-interpret fetcher =
+interpret :: Fetch.Fetcher RealWorld -> VM RealWorld -> Stepper RealWorld a -> IO a
+interpret fetcher vm =
   eval . view
 
   where
     eval
-      :: ProgramView Action a
-      -> StateT VM IO a
+      :: ProgramView (Action RealWorld) a
+      -> IO a
 
     eval (Return x) =
       pure x
 
     eval (action :>>= k) =
       case action of
-        Exec ->
-          (State.state . runState) EVM.Exec.exec >>= interpret fetcher . k
-        Run ->
-          (State.state . runState) EVM.Exec.run >>= interpret fetcher . k
-        Wait q ->
-          do m <- liftIO (fetcher q)
-             State.state (runState m) >> interpret fetcher (k ())
+        Exec -> do
+          (result, vm') <- stToIO $ runStateT EVM.Exec.exec vm
+          interpret fetcher vm' (k result)
+        Run -> do
+          vm' <- stToIO $ execStateT EVM.Exec.exec vm
+          interpret fetcher vm' (k vm')
+        Wait q -> do
+          m <- fetcher q
+          (result, vm') <- stToIO $ runStateT m vm
+          interpret fetcher vm' (k result)
         Ask _ ->
           error "cannot make choices with this interpreter"
-        IOAct m ->
-          do m >>= interpret fetcher . k
+        IOAct m -> do
+          (result, vm') <- runStateT m vm
+          interpret fetcher vm' (k result)
         EVM m -> do
-          r <- State.state (runState m)
-          interpret fetcher (k r)
+          (result, vm') <- stToIO $ runStateT m vm
+          interpret fetcher vm' (k result)

@@ -31,6 +31,7 @@ import GHC.Conc
 import System.Exit (exitFailure)
 import qualified EVM.Fetch as Fetch
 import qualified EVM.FeeSchedule as FeeSchedule
+import Control.Monad.ST (RealWorld, ST)
 
 checkEquiv :: (Typeable a) => Expr a -> Expr a -> IO ()
 checkEquiv a b = withSolvers Z3 1 Nothing $ \s -> do
@@ -48,7 +49,7 @@ runDappTest root =
       res <- dappTest opts testFile Nothing
       unless res exitFailure
 
-testOpts :: SolverGroup -> FilePath -> FilePath -> IO UnitTestOptions
+testOpts :: SolverGroup -> FilePath -> FilePath -> IO (UnitTestOptions RealWorld)
 testOpts solvers root testFile = do
   srcInfo <- readSolc testFile >>= \case
     Nothing -> error "Could not read .sol.json file"
@@ -360,8 +361,8 @@ vat = do
           |]
   fmap fromJust (solcRuntime "Vat" src)
 
-initVm :: ByteString -> VM
-initVm bs = vm
+initVm :: ByteString -> ST s (VM s)
+initVm bs = pure vm
   where
     contractCode = RuntimeCode (ConcreteRuntimeCode bs)
     c = Contract
@@ -402,7 +403,8 @@ initVm bs = vm
 
 -- | Builds the Expr for the given evm bytecode object
 buildExpr :: SolverGroup -> ByteString -> IO (Expr End)
-buildExpr solvers bs = evalStateT (interpret (Fetch.oracle solvers Nothing) Nothing Nothing runExpr) (initVm bs)
+buildExpr solvers bs = undefined
+  -- evalStateT (interpret (Fetch.oracle solvers Nothing) Nothing Nothing runExpr) (initVm bs)
 
 dai :: IO ByteString
 dai = do
