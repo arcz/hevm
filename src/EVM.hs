@@ -415,7 +415,7 @@ data Block = Block
 
 blankState :: EVM s (FrameState s)
 blankState = do
-  mem <- VUnboxed.Mutable.replicate 100000 0
+  mem <- VUnboxed.Mutable.new 0
   pure $ FrameState
     { _contract     = 0
     , _codeContract = 0
@@ -498,8 +498,7 @@ makeVm o = do
       touched = if o.vmoptCreate then [txorigin] else [txorigin, txtoAddr]
 
   -- mem <- VUnboxed.Mutable.new 0
-  let size = 100000
-  mem <- VUnboxed.Mutable.replicate size 0
+  mem <- VUnboxed.Mutable.new 0
   pure $ VM
     { _result = Nothing
     , _frames = mempty
@@ -635,7 +634,7 @@ exec1 = do
                     fromMaybe (error "could not analyze symbolic code") $
                       unlitByte $ ops V.! vm._state._pc
 
-      case getOp(?op) of
+      case getOp (?op) of
 
         OpPush n' -> do
           let n = fromIntegral n'
@@ -1436,7 +1435,7 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
         0x4 -> do
             assign (state . stack) (Lit 1 : xs)
             assign (state . returndata) input
-            copyCallBytesToMemory input (Lit outSize) (Lit 0) (Lit outOffset)
+            copyCallBytesToMemory input (Lit outSize) (Lit outOffset)
             next
 
         -- MODEXP
@@ -2038,12 +2037,14 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
                                     , callContextCodehash  = target._codehash
                                     , callContextReversion = (vm0._env._contracts, vm0._env._storage)
                                     , callContextSubState  = vm0._tx._substate
-                                    , callContextAbi =
+                                    , callContextAbi = Nothing
+                                      {-
                                         if xInSize >= 4
                                         then case unlit $ readBytes 4 (Lit xInOffset) undefined -- vm0._state._memory
                                              of Nothing -> Nothing
                                                 Just abi -> Just $ num abi
                                         else Nothing
+                                        -}
                                     , callContextData = ccd
                                     }
 
@@ -2060,7 +2061,7 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
                         (InitCode _ _) -> InitCode mempty mempty
                         a -> a
 
-                  mem <- VUnboxed.Mutable.replicate 100000 0
+                  mem <- VUnboxed.Mutable.new 0
                   zoom state $ do
                     assign gas (num xGas)
                     assign pc 0
@@ -2071,7 +2072,7 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
                     assign memorySize 0
                     assign returndata mempty
                     -- assign calldata (copySlice (Lit xInOffset) (Lit 0) (Lit xInSize) vm0._state._memory mempty)
-                    assign calldata (copySlice (Lit xInOffset) (Lit 0) (Lit xInSize) undefined mempty)
+                    assign calldata ccd -- (copySlice (Lit xInOffset) (Lit 0) (Lit xInSize) undefined mempty)
 
                   continue xTo'
 
@@ -2299,7 +2300,7 @@ finishFrame how = do
             -- Case 1: Returning from a call?
             FrameReturned output -> do
               assign (state . returndata) output
-              copyCallBytesToMemory output outSize (Lit 0) outOffset
+              copyCallBytesToMemory output outSize outOffset
               reclaimRemainingGasAllowance
               push 1
 
@@ -2309,7 +2310,7 @@ finishFrame how = do
               revertStorage
               revertSubstate
               assign (state . returndata) output
-              copyCallBytesToMemory output outSize (Lit 0) outOffset
+              copyCallBytesToMemory output outSize outOffset
               reclaimRemainingGasAllowance
               push 0
 
@@ -2379,10 +2380,16 @@ accessUnboundedMemoryRange _ 0 continue = continue
 accessUnboundedMemoryRange f l continue = do
   m0 <- num <$> use (state . memorySize)
   fees <- gets (._block._schedule)
+  vm <- get
   do
     let m1 = 32 * ceilDiv (max m0 (f + l)) 32
     burn (memoryCost fees m1 - memoryCost fees m0) $ do
       assign (state . memorySize) m1
+      case vm._state._memory of
+        ConcreteMemory mem -> do
+          mem' <- VUnboxed.Mutable.grow mem (fromIntegral m1)
+          assign (state . memory) $ ConcreteMemory mem'
+        _ -> pure ()
       continue
 
 accessMemoryRange
@@ -2411,22 +2418,20 @@ copyBytesToMemory bs size xOffset yOffset =
     vm <- get
     case vm._state._memory of
       ConcreteMemory mem -> do
-        let Lit xOffset' = xOffset
-        let Lit yOffset' = yOffset
-        let Lit size' = size
-        case bs of
-          ConcreteBuf b ->
-            mapM_ (VUnboxed.Mutable.write mem (fromIntegral xOffset'))
-                  (BS.unpack $ BS.take (fromIntegral size') $ BS.drop (fromIntegral yOffset') b)
-          _ -> error "implement me"
+        case (bs, size, xOffset, yOffset) of
+          (ConcreteBuf b, Lit size', Lit xOffset', Lit yOffset') ->
+            mapM_ (uncurry (VUnboxed.Mutable.write mem))
+                  (zip [fromIntegral xOffset'..]
+                       (BS.unpack $ BS.take (fromIntegral size') $ padRight (fromIntegral size') $ BS.drop (fromIntegral yOffset') b))
+          _ -> error "symbolic, implement me"
       SymbolicMemory mem ->
         assign (state . memory) $
           SymbolicMemory $ copySlice xOffset yOffset size bs mem
 
 copyCallBytesToMemory
-  :: Expr Buf -> Expr EWord -> Expr EWord -> Expr EWord -> EVM s ()
-copyCallBytesToMemory bs size xOffset yOffset =
-  copyBytesToMemory bs (Expr.min size (bufLength bs)) xOffset yOffset
+  :: Expr Buf -> Expr EWord -> Expr EWord -> EVM s ()
+copyCallBytesToMemory bs size yOffset =
+  copyBytesToMemory bs (Expr.min size (bufLength bs)) (Lit 0) yOffset
 
 readMemory :: Expr EWord -> Expr EWord -> EVM s (Expr Buf)
 readMemory offset' size' = do
@@ -2435,10 +2440,13 @@ readMemory offset' size' = do
     ConcreteMemory mem -> do
       case (offset', size') of
         (Lit offset, Lit size) -> do
-          a <- VUnboxed.freeze $ VUnboxed.Mutable.slice (fromIntegral offset) (fromIntegral size) mem
-          pure $ ConcreteBuf $ BS.pack $ VUnboxed.toList a
+          if offset > Expr.maxBytes || size > Expr.maxBytes then
+            pure $ ConcreteBuf $ BS.replicate (fromIntegral size) 0
+          else do
+            a <- VUnboxed.freeze $ VUnboxed.Mutable.slice (fromIntegral offset) (fromIntegral size) mem
+            pure $ ConcreteBuf $ BS.pack $ VUnboxed.toList a
         _ ->
-          undefined
+          error "readMemory transition"
           -- pure $ copySlice offset' (Lit 0) size' mem mempty
     SymbolicMemory mem ->
       pure $ copySlice offset' (Lit 0) size' mem mempty
