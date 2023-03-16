@@ -54,6 +54,7 @@ import System.Console.Haskeline qualified as Readline
 import Paths_hevm qualified as Paths
 import Text.Wrap
 import Control.Monad.ST (RealWorld, stToIO, ST)
+import qualified Data.Vector.Unboxed as VUnboxed
 
 data Name
   = AbiPane
@@ -73,6 +74,7 @@ type FrozenMemory = Expr Buf
 data UiVmState = UiVmState
   -- { _uiVm           :: (VM RealWorld, FrozenMemory)
   { _uiVm           :: VM RealWorld
+  , _uiVmMemory     :: Expr Buf
   , _uiStep         :: Int
   , _uiSnapshots    :: Map Int (VM RealWorld, Stepper RealWorld ())
   , _uiStepper      :: Stepper RealWorld ()
@@ -266,6 +268,7 @@ initUiVmState :: VM RealWorld -> UnitTestOptions RealWorld -> Stepper RealWorld 
 initUiVmState vm0 opts script =
   UiVmState
     { _uiVm           = vm0
+    , _uiVmMemory = mempty
     , _uiStepper      = script
     , _uiStep         = 0
     , _uiSnapshots    = singleton 0 (vm0, script)
@@ -805,7 +808,14 @@ stepOneOpcode restart = do
   when (n > 0 && n `mod` snapshotInterval == 0) $ do
     vm <- use uiVm
     modifying uiSnapshots (insert n (vm, void restart))
-  -- modifying uiVm (execState exec1)
+  s <- get
+  vm' <- liftIO $ stToIO $ (execStateT exec1) s._uiVm
+  mem' <- case vm'._state._memory of
+            ConcreteMemory mem -> do
+              ConcreteBuf . BS.pack . VUnboxed.toList <$> VUnboxed.freeze mem
+            SymbolicMemory mem -> pure mem
+  assign uiVm vm'
+  assign uiVmMemory mem'
   modifying uiStep (+ 1)
 
 isNewTraceAdded
@@ -945,7 +955,7 @@ drawTracePane s =
         <=> hBorderWithLabel (txt "Path Conditions")
         <=> (ourWrap $ show $ vm._constraints)
         <=> hBorderWithLabel (txt "Memory")
-        -- <=> (ourWrap (prettyIfConcrete vm._state._memory))
+        <=> (ourWrap (prettyIfConcrete s._uiVmMemory))
     False ->
       hBorderWithLabel (txt "Trace")
       <=> renderList

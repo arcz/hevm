@@ -273,8 +273,8 @@ data FrameState s = FrameState
   deriving (Show)
 
 data Memory s
-  = ConcreteMemory (STVector s Word8)
-  | SymbolicMemory (Expr Buf) -- in practice ConcreteBuf won't be used
+  = ConcreteMemory !(STVector s Word8)
+  | SymbolicMemory !(Expr Buf) -- in practice ConcreteBuf won't be used
 
 instance Show (Memory s) where
   show (ConcreteMemory _) = "<can't show mutable memory>"
@@ -957,12 +957,14 @@ exec1 = do
               burn g_verylow $
                 accessMemoryWord x $ do
                   next
-                  case vm._state._memory of
+                  expandMemory (fromIntegral (x + 32 + 1))
+                  vm' <- get
+                  case vm'._state._memory of
                     ConcreteMemory mem -> do
                       case y of
-                        Lit w ->
-                          mapM_ (VUnboxed.Mutable.write mem (fromIntegral x))
-                                (BS.unpack $ word256Bytes w)
+                        Lit w -> do
+                          mapM_ (uncurry (VUnboxed.Mutable.write mem))
+                                (zip [fromIntegral x..] (BS.unpack $ word256Bytes w))
                         _ -> error "implement me"
                     SymbolicMemory mem ->
                       assign (state . memory) (SymbolicMemory $ writeWord (Lit x) y mem)
@@ -976,10 +978,12 @@ exec1 = do
                 accessMemoryRange x 1 $ do
                   let yByte = indexWord (Lit 31) y
                   next
-                  case vm._state._memory of
+                  expandMemory (fromIntegral x + 1)
+                  vm' <- get
+                  case vm'._state._memory of
                     ConcreteMemory mem -> do
                       case yByte of
-                        LitByte byte ->
+                        LitByte byte -> do
                           VUnboxed.Mutable.write mem (fromIntegral x) byte
                         _ -> do
                           -- copy out and move to symbolic memory
@@ -1885,7 +1889,6 @@ cheat
   => (W256, W256) -> (W256, W256)
   -> EVM s ()
 cheat (inOffset, inSize) (outOffset, outSize) = do
-  mem <- use (state . memory)
   vm <- get
   let abi = undefined -- readBytes 4 (Lit inOffset) mem
   input <- readMemory (Lit $ inOffset + 4) (Lit $ inSize - 4)
@@ -2380,16 +2383,10 @@ accessUnboundedMemoryRange _ 0 continue = continue
 accessUnboundedMemoryRange f l continue = do
   m0 <- num <$> use (state . memorySize)
   fees <- gets (._block._schedule)
-  vm <- get
   do
     let m1 = 32 * ceilDiv (max m0 (f + l)) 32
     burn (memoryCost fees m1 - memoryCost fees m0) $ do
       assign (state . memorySize) m1
-      case vm._state._memory of
-        ConcreteMemory mem -> do
-          mem' <- VUnboxed.Mutable.grow mem (fromIntegral m1)
-          assign (state . memory) $ ConcreteMemory mem'
-        _ -> pure ()
       continue
 
 accessMemoryRange
@@ -2419,10 +2416,12 @@ copyBytesToMemory bs size xOffset yOffset =
     case vm._state._memory of
       ConcreteMemory mem -> do
         case (bs, size, xOffset, yOffset) of
-          (ConcreteBuf b, Lit size', Lit xOffset', Lit yOffset') ->
-            mapM_ (uncurry (VUnboxed.Mutable.write mem))
-                  (zip [fromIntegral xOffset'..]
-                       (BS.unpack $ BS.take (fromIntegral size') $ padRight (fromIntegral size') $ BS.drop (fromIntegral yOffset') b))
+          (ConcreteBuf b, Lit size', Lit xOffset', Lit yOffset') -> do
+            expandMemory (fromIntegral (yOffset' + size'))
+            ConcreteMemory mem' <- gets (._state._memory)
+            mapM_ (uncurry (VUnboxed.Mutable.write mem'))
+                  (zip [fromIntegral yOffset'..]
+                       (BS.unpack $ BS.take (fromIntegral size') $ padRight (fromIntegral size') $ BS.drop (fromIntegral xOffset') b))
           _ -> error "symbolic, implement me"
       SymbolicMemory mem ->
         assign (state . memory) $
@@ -2440,11 +2439,20 @@ readMemory offset' size' = do
     ConcreteMemory mem -> do
       case (offset', size') of
         (Lit offset, Lit size) -> do
-          if offset > Expr.maxBytes || size > Expr.maxBytes then
+          let memSize = fromIntegral (VUnboxed.Mutable.length mem)
+          if offset > Expr.maxBytes ||
+             size > Expr.maxBytes ||
+             offset + size > Expr.maxBytes ||
+             offset >= memSize then
+            -- reads past memory are all zeros
             pure $ ConcreteBuf $ BS.replicate (fromIntegral size) 0
           else do
-            a <- VUnboxed.freeze $ VUnboxed.Mutable.slice (fromIntegral offset) (fromIntegral size) mem
-            pure $ ConcreteBuf $ BS.pack $ VUnboxed.toList a
+            let pastEnd = (offset + size) - memSize
+            let fromMemSize = fromIntegral $ if pastEnd > 0 then size - pastEnd else size
+
+            a <- VUnboxed.freeze $ VUnboxed.Mutable.slice (fromIntegral offset) fromMemSize mem
+            let dataFromMem = BS.pack $ VUnboxed.toList a
+            pure $ ConcreteBuf $ dataFromMem <> BS.replicate (fromIntegral pastEnd) 0
         _ ->
           error "readMemory transition"
           -- pure $ copySlice offset' (Lit 0) size' mem mempty
@@ -2831,6 +2839,17 @@ codeloc = do
   let self = vm._state._contract
       loc = vm._state._pc
   pure (self, loc)
+
+expandMemory :: Int -> EVM s ()
+expandMemory targetSize = do
+  vm <- get
+  case vm._state._memory of
+    ConcreteMemory mem -> do
+      let toAlloc = targetSize - VUnboxed.Mutable.length mem
+      when (toAlloc > 0) $ do
+        mem' <- VUnboxed.Mutable.grow mem toAlloc
+        assign (state . memory) (ConcreteMemory mem')
+    _ -> pure ()
 
 -- * Emacs setup
 
