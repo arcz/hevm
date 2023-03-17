@@ -2030,6 +2030,7 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
           vm0 <- get
           fetchAccount xTo' $ \target ->
                 burn xGas $ do
+                  -- error $ show xInOffset
                   ccd <- readMemory (Lit xInOffset) (Lit xInSize)
 
                   let newContext = CallContext
@@ -2409,23 +2410,34 @@ accessMemoryWord x = accessMemoryRange x 32
 
 copyBytesToMemory
   :: Expr Buf -> Expr EWord -> Expr EWord -> Expr EWord -> EVM s ()
-copyBytesToMemory bs size xOffset yOffset =
+copyBytesToMemory bs size srcOffset memOffset =
   if size == (Lit 0) then noop
   else do
     vm <- get
     case vm._state._memory of
       ConcreteMemory mem -> do
-        case (bs, size, xOffset, yOffset) of
-          (ConcreteBuf b, Lit size', Lit xOffset', Lit yOffset') -> do
-            expandMemory (fromIntegral (yOffset' + size'))
+        case (bs, size, srcOffset, memOffset) of
+          (ConcreteBuf b, Lit size', Lit srcOffset', Lit memOffset') -> do
+            expandMemory (fromIntegral (memOffset' + size'))
             ConcreteMemory mem' <- gets (._state._memory)
+
+            -- let pastEnd :: Int = (fromIntegral srcOffset' + fromIntegral size') - BS.length b
+            -- let fromSrcSize = if pastEnd > 0 then fromIntegral size' - pastEnd else fromIntegral size'
+
+            let src =
+                  if srcOffset' >= fromIntegral (BS.length b) then
+                    BS.replicate (fromIntegral size') 0
+                  else
+                    BS.take (fromIntegral size') $
+                    padRight (fromIntegral size') $
+                    BS.drop (fromIntegral srcOffset') b
+
             mapM_ (uncurry (VUnboxed.Mutable.write mem'))
-                  (zip [fromIntegral yOffset'..]
-                       (BS.unpack $ BS.take (fromIntegral size') $ padRight (fromIntegral size') $ BS.drop (fromIntegral xOffset') b))
+                  (zip [fromIntegral memOffset'..] (BS.unpack src))
           _ -> error "symbolic, implement me"
       SymbolicMemory mem ->
         assign (state . memory) $
-          SymbolicMemory $ copySlice xOffset yOffset size bs mem
+          SymbolicMemory $ copySlice srcOffset memOffset size bs mem
 
 copyCallBytesToMemory
   :: Expr Buf -> Expr EWord -> Expr EWord -> EVM s ()
@@ -2447,8 +2459,8 @@ readMemory offset' size' = do
             -- reads past memory are all zeros
             pure $ ConcreteBuf $ BS.replicate (fromIntegral size) 0
           else do
-            let pastEnd = (offset + size) - memSize
-            let fromMemSize = fromIntegral $ if pastEnd > 0 then size - pastEnd else size
+            let pastEnd :: Int = (fromIntegral offset + fromIntegral size) - fromIntegral memSize
+            let fromMemSize = if pastEnd > 0 then fromIntegral size - pastEnd else fromIntegral size
 
             a <- VUnboxed.freeze $ VUnboxed.Mutable.slice (fromIntegral offset) fromMemSize mem
             let dataFromMem = BS.pack $ VUnboxed.toList a

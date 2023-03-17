@@ -55,6 +55,7 @@ import qualified Paths_hevm      as Paths
 
 import Options.Generic as Options
 import qualified EVM.Transaction
+import Control.Monad.ST (RealWorld)
 
 -- This record defines the program's command-line options
 -- automatically via the `optparse-generic` package.
@@ -191,7 +192,7 @@ optsMode x
   | x.jsontrace = JsonTrace
   | otherwise = Run
 
-applyCache :: (Maybe String, Maybe String) -> IO (EVM.VM -> EVM.VM)
+applyCache :: (Maybe String, Maybe String) -> IO (EVM.VM RealWorld -> EVM.VM RealWorld)
 applyCache (state, cache) =
   let applyState = flip Facts.apply
       applyCache' = flip Facts.applyCache
@@ -209,7 +210,7 @@ applyCache (state, cache) =
       stateFacts <- Git.loadFacts (Git.RepoAt statePath)
       pure $ (applyState stateFacts) . (applyCache' cacheFacts)
 
-unitTestOptions :: Command Options.Unwrapped -> SolverGroup -> String -> IO UnitTestOptions
+unitTestOptions :: Command Options.Unwrapped -> SolverGroup -> String -> IO (UnitTestOptions RealWorld)
 unitTestOptions cmd solvers testFile = do
   let root = fromMaybe "." cmd.dappRoot
   srcInfo <- readSolc testFile >>= \case
@@ -438,7 +439,7 @@ getTimeout :: ProofResult a b c -> Maybe c
 getTimeout (Timeout c) = Just c
 getTimeout _ = Nothing
 
-dappCoverage :: UnitTestOptions -> Mode -> String -> IO ()
+dappCoverage :: UnitTestOptions RealWorld -> Mode -> String -> IO ()
 dappCoverage opts _ solcFile =
   readSolc solcFile >>=
     \case
@@ -485,7 +486,7 @@ launchExec cmd = do
   withSolvers Z3 0 Nothing $ \solvers -> do
     case optsMode cmd of
       Run -> do
-        vm' <- execStateT (EVM.Stepper.interpret (EVM.Fetch.oracle solvers rpcinfo) . void $ EVM.Stepper.execFully) vm
+        vm' <- undefined -- execStateT (EVM.Stepper.interpret (EVM.Fetch.oracle solvers rpcinfo) . void $ EVM.Stepper.execFully) vm
         when cmd.trace $ T.hPutStr stderr (showTraceTree dapp vm')
         case view EVM.result vm' of
           Nothing ->
@@ -520,7 +521,7 @@ launchExec cmd = do
            rpcinfo = (,) block' <$> cmd.rpc
 
 -- | Creates a (concrete) VM from command line options
-vmFromCommand :: Command Options.Unwrapped -> IO EVM.VM
+vmFromCommand :: Command Options.Unwrapped -> IO (EVM.VM RealWorld)
 vmFromCommand cmd = do
   withCache <- applyCache (cmd.state, cmd.cache)
 
@@ -566,7 +567,8 @@ vmFromCommand cmd = do
         Just t -> t
         Nothing -> error "unexpected symbolic timestamp when executing vm test"
 
-  return $ EVM.Transaction.initTx $ withCache (vm0 baseFee miner ts' blockNum prevRan contract)
+  undefined
+  -- return $ EVM.Transaction.initTx $ withCache (vm0 baseFee miner ts' blockNum prevRan contract)
     where
         block'   = maybe EVM.Fetch.Latest EVM.Fetch.BlockNumber cmd.block
         value'   = word (.value) 0
@@ -611,7 +613,7 @@ vmFromCommand cmd = do
         addr f def = fromMaybe def (f cmd)
         bytes f def = maybe def decipher (f cmd)
 
-symvmFromCommand :: Command Options.Unwrapped -> (Expr Buf, [Prop]) -> IO (EVM.VM)
+symvmFromCommand :: Command Options.Unwrapped -> (Expr Buf, [Prop]) -> IO (EVM.VM RealWorld)
 symvmFromCommand cmd calldata' = do
   (miner,blockNum,baseFee,prevRan) <- case cmd.rpc of
     Nothing -> return (0,0,0,0)
@@ -663,8 +665,9 @@ symvmFromCommand cmd calldata' = do
     (_, _, Nothing) ->
       error "must provide at least (rpc + address) or code"
 
-  return $ (EVM.Transaction.initTx $ withCache $ vm0 baseFee miner ts blockNum prevRan calldata' callvalue' caller' contract')
-    & set (EVM.env . EVM.storage) store
+  --return $ (EVM.Transaction.initTx $ withCache $ vm0 baseFee miner ts blockNum prevRan calldata' callvalue' caller' contract')
+  --  & set (EVM.env . EVM.storage) store
+  undefined
 
   where
     decipher = hexByteString "bytes" . strip0x
