@@ -694,6 +694,9 @@ tests = testGroup "hevm"
     , testCase "Cheat-Codes-Pass" $ do
         let testFile = "test/contracts/pass/cheatCodes.sol"
         runDappTest testFile ".*" >>= assertEqual "test result" True
+    , testCase "Cheat-Codes-Fork-Pass" $ do
+        let testFile = "test/contracts/pass/cheatCodesFork.sol"
+        runDappTest testFile ".*" >>= assertEqual "test result" True
     , testCase "Cheat-Codes-Fail" $ do
         let testFile = "test/contracts/fail/cheatCodes.sol"
         runDappTestCustom testFile "testBadFFI" Nothing False Nothing >>= assertEqual "test result" False
