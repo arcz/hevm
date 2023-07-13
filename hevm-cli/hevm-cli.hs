@@ -55,7 +55,7 @@ import qualified Paths_hevm      as Paths
 
 import Options.Generic as Options
 import qualified EVM.Transaction
-import Control.Monad.ST (RealWorld)
+import Control.Monad.ST (RealWorld, stToIO)
 
 -- This record defines the program's command-line options
 -- automatically via the `optparse-generic` package.
@@ -486,7 +486,7 @@ launchExec cmd = do
   withSolvers Z3 0 Nothing $ \solvers -> do
     case optsMode cmd of
       Run -> do
-        vm' <- undefined -- execStateT (EVM.Stepper.interpret (EVM.Fetch.oracle solvers rpcinfo) . void $ EVM.Stepper.execFully) vm
+        vm' <- EVM.Stepper.interpret (EVM.Fetch.oracle solvers rpcinfo) vm EVM.Stepper.runFully
         when cmd.trace $ T.hPutStr stderr (showTraceTree dapp vm')
         case view EVM.result vm' of
           Nothing ->
@@ -567,8 +567,8 @@ vmFromCommand cmd = do
         Just t -> t
         Nothing -> error "unexpected symbolic timestamp when executing vm test"
 
-  undefined
-  -- return $ EVM.Transaction.initTx $ withCache (vm0 baseFee miner ts' blockNum prevRan contract)
+  vm <- stToIO $ vm0 baseFee miner ts' blockNum prevRan contract
+  return $ EVM.Transaction.initTx $ withCache vm
     where
         block'   = maybe EVM.Fetch.Latest EVM.Fetch.BlockNumber cmd.block
         value'   = word (.value) 0
